@@ -4,15 +4,15 @@
   "max_papers": 5,
   "cluster_k": 0,
   "include_images": true,
-  "output_dir": "/Users/la/Desktop/research_skills/",
+  "output_dir": "outputs",
   "session_layout": "folder",
-  "session_name": "mRna",
+  "session_name": "",
   "llm_mode": "codex_cli",
   "llm_model": "gpt-5-mini",
-  "codex_bin": "/Applications/Codex.app/Contents/Resources/codex",
   "llm_base_url": "http://127.0.0.1:11434/v1",
+  "codex_bin": "",
   "llm_timeout_sec": 180,
   "llm_max_input_chars": 4000,
   "llm_max_tokens": 512,
-  "section_map_json": "/Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/config/section_map.default.json"
+  "section_map_json": "config/section_map.default.json"
 }

@@ -9,9 +9,11 @@ from typing import Dict, Any
 import streamlit as st
 
 
-SCRIPT = "/Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/build_litreview.py"
-DEFAULT_OUTPUT = "/Users/la/Desktop/research_skills/"
-DEFAULT_CONFIG = "/Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/config/pipeline.json"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = str((PROJECT_ROOT / "scripts" / "build_litreview.py").resolve())
+DEFAULT_OUTPUT = str((PROJECT_ROOT / "outputs").resolve())
+DEFAULT_CONFIG = str((PROJECT_ROOT / "config" / "pipeline.json").resolve())
+DEFAULT_SECTION_MAP = str((PROJECT_ROOT / "config" / "section_map.default.json").resolve())
 
 
 def sanitize_session_name(name: str) -> str:
@@ -128,11 +130,11 @@ def default_config() -> Dict[str, Any]:
         "llm_mode": "codex_cli",
         "llm_model": "gpt-5-mini",
         "llm_base_url": "http://127.0.0.1:11434/v1",
-        "codex_bin": "/Applications/Codex.app/Contents/Resources/codex",
+        "codex_bin": "",
         "llm_timeout_sec": 180,
         "llm_max_input_chars": 4000,
         "llm_max_tokens": 512,
-        "section_map_json": "/Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/config/section_map.default.json",
+        "section_map_json": DEFAULT_SECTION_MAP,
     }
 
 
@@ -485,7 +487,7 @@ with tab_config:
         cfg_llm_base_url = st.text_input("LLM Base URL", value=str(cfg.get("llm_base_url", "http://127.0.0.1:11434/v1")))
         cfg_codex_bin = st.text_input(
             "Codex Bin",
-            value=str(cfg.get("codex_bin", "/Applications/Codex.app/Contents/Resources/codex")),
+            value=str(cfg.get("codex_bin", "")),
         )
         cfg_llm_timeout_sec = st.number_input(
             "LLM Timeout (sec)",
@@ -514,7 +516,7 @@ with tab_config:
         value=str(
             cfg.get(
                 "section_map_json",
-                "/Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/config/section_map.default.json",
+                DEFAULT_SECTION_MAP,
             )
         ),
     )

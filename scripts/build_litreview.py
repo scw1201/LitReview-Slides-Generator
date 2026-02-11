@@ -349,7 +349,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--llm_max_tokens", type=int, default=180)
     p.add_argument("--zotero_db", default=str(Path.home() / "Zotero" / "zotero.sqlite"))
     p.add_argument("--zotero_storage_dir", default=str(Path.home() / "Zotero" / "storage"))
-    p.add_argument("--output_dir", default="/Users/la/Desktop/research_skills/")
+    p.add_argument("--output_dir", default="outputs")
     p.add_argument("--session_name", default="", help="Session id/name for this run")
     p.add_argument(
         "--session_layout",
@@ -454,7 +454,7 @@ def apply_config_defaults(args: argparse.Namespace, cfg: Dict[str, Any]) -> None
         "llm_timeout_sec": 180,
         "llm_max_input_chars": 12000,
         "llm_max_tokens": 180,
-        "output_dir": "/Users/la/Desktop/research_skills/",
+        "output_dir": "outputs",
         "session_name": "",
         "session_layout": "folder",
         "section_map_json": "",

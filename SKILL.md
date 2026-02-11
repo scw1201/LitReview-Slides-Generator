@@ -10,7 +10,7 @@ Use this skill to run the local pipeline and produce `review_<collection>.pptx`.
 ## Run GUI
 
 ```bash
-streamlit run /Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/gui.py
+streamlit run scripts/gui.py
 ```
 
 Use GUI tabs in this order:
@@ -23,38 +23,38 @@ Use GUI tabs in this order:
 Step 1, analyze each paper:
 
 ```bash
-python3 /Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/build_litreview.py \
+python3 scripts/build_litreview.py \
   --mode analyze \
   --collection "museum-digital-human" \
   --language zh \
   --llm_mode codex_cli \
   --llm_model gpt-5-mini \
-  --output_dir /Users/la/Desktop/research_skills/
+  --output_dir outputs
 ```
 
 Step 2, global synthesis:
 
 ```bash
-python3 /Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/build_litreview.py \
+python3 scripts/build_litreview.py \
   --mode global \
   --collection "museum-digital-human" \
   --cluster_k 4 \
   --llm_mode codex_cli \
   --llm_model gpt-5-mini \
-  --output_dir /Users/la/Desktop/research_skills/
+  --output_dir outputs
 ```
 
 Step 3, render markdown and ppt:
 
 ```bash
-python3 /Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/build_litreview.py \
+python3 scripts/build_litreview.py \
   --mode render \
   --collection "museum-digital-human" \
   --language zh \
   --include_images true \
   --llm_mode codex_cli \
   --llm_model gpt-5-mini \
-  --output_dir /Users/la/Desktop/research_skills/
+  --output_dir outputs
 ```
 
 ## Codex-First Quality Mode
@@ -63,7 +63,7 @@ Use `--llm_mode codex_cli` in all stages so content generation is done by Codex.
 
 ## Key Files
 
-- `/Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/build_litreview.py`
-- `/Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/gui.py`
-- `/Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/config/pipeline.json`
-- `/Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/config/section_map.default.json`
+- `scripts/build_litreview.py`
+- `scripts/gui.py`
+- `config/pipeline.json`
+- `config/section_map.default.json`
