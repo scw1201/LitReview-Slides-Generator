@@ -47,12 +47,18 @@ python3 /Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/build_l
   --llm_timeout_sec 180 \
   --llm_max_input_chars 4000 \
   --llm_max_tokens 512 \
+  --session_layout folder \
+  --session_name "museum-20260211-am" \
   --section_map_json /Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/config/section_map.default.json \
   --output_dir /Users/la/Desktop/research_skills/ \
   --verbose
 ```
 
 If you still want local/Ollama models, set `--llm_mode openai_compatible` and provide `--llm_base_url`.
+Session behavior:
+- `--session_layout folder` (default): outputs under `/output_dir/<collection>/...`
+  - if `--session_name` is set and different from collection, outputs under `/output_dir/<collection>/<session_name>/...`
+- `--session_layout filename`: outputs as `review_<collection>.<session_name>.*` in `output_dir`
 
 ## Notes
 

@@ -14,28 +14,53 @@ DEFAULT_OUTPUT = "/Users/la/Desktop/research_skills/"
 DEFAULT_CONFIG = "/Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/config/pipeline.json"
 
 
-def status_path(collection: str, outdir: str) -> Path:
-    return Path(outdir) / f"review_{collection}.status.json"
+def sanitize_session_name(name: str) -> str:
+    import re
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", (name or "").strip()).strip("._-")
 
 
-def log_path(collection: str, outdir: str) -> Path:
-    return Path(outdir) / f"review_{collection}.run.log"
+def resolve_session_paths(collection: str, outdir: str, session_name: str, session_layout: str):
+    sess = sanitize_session_name(session_name)
+    root = Path(outdir)
+    collection_dir = sanitize_session_name(collection) or collection
+    base = f"review_{collection}"
+    if (session_layout or "folder") == "filename":
+        stem = f"{base}.{sess or collection_dir}"
+        return root, stem
+    coll_root = root / collection_dir
+    if not sess or sess == collection_dir:
+        return coll_root, base
+    return coll_root / sess, base
 
 
-def paper_status_path(collection: str, outdir: str) -> Path:
-    return Path(outdir) / f"review_{collection}.paper_status.jsonl"
+def status_path(collection: str, outdir: str, session_name: str, session_layout: str) -> Path:
+    d, stem = resolve_session_paths(collection, outdir, session_name, session_layout)
+    return d / f"{stem}.status.json"
 
 
-def analyze_json_path(collection: str, outdir: str) -> Path:
-    return Path(outdir) / f"review_{collection}.analyze.json"
+def log_path(collection: str, outdir: str, session_name: str, session_layout: str) -> Path:
+    d, stem = resolve_session_paths(collection, outdir, session_name, session_layout)
+    return d / f"{stem}.run.log"
 
 
-def global_json_path(collection: str, outdir: str) -> Path:
-    return Path(outdir) / f"review_{collection}.global.json"
+def paper_status_path(collection: str, outdir: str, session_name: str, session_layout: str) -> Path:
+    d, stem = resolve_session_paths(collection, outdir, session_name, session_layout)
+    return d / f"{stem}.paper_status.jsonl"
 
 
-def report_json_path(collection: str, outdir: str) -> Path:
-    return Path(outdir) / f"review_{collection}.json"
+def analyze_json_path(collection: str, outdir: str, session_name: str, session_layout: str) -> Path:
+    d, stem = resolve_session_paths(collection, outdir, session_name, session_layout)
+    return d / f"{stem}.analyze.json"
+
+
+def global_json_path(collection: str, outdir: str, session_name: str, session_layout: str) -> Path:
+    d, stem = resolve_session_paths(collection, outdir, session_name, session_layout)
+    return d / f"{stem}.global.json"
+
+
+def report_json_path(collection: str, outdir: str, session_name: str, session_layout: str) -> Path:
+    d, stem = resolve_session_paths(collection, outdir, session_name, session_layout)
+    return d / f"{stem}.json"
 
 
 def read_jsonl(path: Path):
@@ -77,11 +102,11 @@ def detect_build_processes():
         return []
 
 
-def clear_runtime_state(collection: str, outdir: str) -> None:
+def clear_runtime_state(collection: str, outdir: str, session_name: str, session_layout: str) -> None:
     targets = [
-        status_path(collection, outdir),
-        log_path(collection, outdir),
-        paper_status_path(collection, outdir),
+        status_path(collection, outdir, session_name, session_layout),
+        log_path(collection, outdir, session_name, session_layout),
+        paper_status_path(collection, outdir, session_name, session_layout),
     ]
     for p in targets:
         try:
@@ -98,9 +123,12 @@ def default_config() -> Dict[str, Any]:
         "cluster_k": 0,
         "include_images": True,
         "output_dir": DEFAULT_OUTPUT,
+        "session_name": "",
+        "session_layout": "folder",
         "llm_mode": "codex_cli",
         "llm_model": "gpt-5-mini",
         "llm_base_url": "http://127.0.0.1:11434/v1",
+        "codex_bin": "/Applications/Codex.app/Contents/Resources/codex",
         "llm_timeout_sec": 180,
         "llm_max_input_chars": 4000,
         "llm_max_tokens": 512,
@@ -208,6 +236,13 @@ config_path = st.session_state["config_path"]
 cfg = st.session_state["cfg"]
 collection = str(cfg.get("collection", "museum-digital-human"))
 output_dir = str(cfg.get("output_dir", DEFAULT_OUTPUT))
+cfg_session_name = str(cfg.get("session_name", "")).strip()
+cfg_session_layout = str(cfg.get("session_layout", "folder"))
+if cfg_session_layout not in {"folder", "filename"}:
+    cfg_session_layout = "folder"
+
+if "active_session_name" not in st.session_state:
+    st.session_state["active_session_name"] = cfg_session_name or (sanitize_session_name(collection) or collection)
 
 if "run_pids" not in st.session_state:
     st.session_state["run_pids"] = {"analyze": None, "global": None, "render": None, "all": None}
@@ -223,6 +258,19 @@ if "auto_refresh_migrated" not in st.session_state:
 
 def launch_mode(mode: str):
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+    session_layout = str(cfg.get("session_layout", "folder"))
+    if session_layout not in {"folder", "filename"}:
+        session_layout = "folder"
+    collection_session = sanitize_session_name(collection) or collection
+    configured = sanitize_session_name(str(cfg.get("session_name", "")))
+    active = sanitize_session_name(str(st.session_state.get("active_session_name", "")))
+    session_name = active or configured or collection_session
+    if mode in {"analyze", "all"} and not session_name:
+        session_name = collection_session
+        st.session_state["active_session_name"] = session_name
+    if mode in {"global", "render"} and not session_name:
+        st.error("请先运行 Step 1，或在 Config 中设置 Session Name。")
+        return
     # stop all old jobs first
     for m, pid in st.session_state["run_pids"].items():
         if is_pid_running(pid):
@@ -232,7 +280,7 @@ def launch_mode(mode: str):
                 pass
             st.session_state["run_pids"][m] = None
     if mode == "analyze":
-        clear_runtime_state(collection, output_dir)
+        clear_runtime_state(collection, output_dir, session_name, session_layout)
 
     args = [
         "python3",
@@ -243,13 +291,17 @@ def launch_mode(mode: str):
         collection,
         "--config_json",
         config_path,
+        "--session_name",
+        session_name,
+        "--session_layout",
+        session_layout,
     ]
     env = os.environ.copy()
     if str(cfg.get("llm_mode", "off")) == "openai_compatible":
         env["OPENAI_API_KEY"] = "ollama"
     proc = run_cmd(args, env)
     st.session_state["run_pids"][mode] = proc.pid
-    st.success(f"Started {mode} PID={proc.pid}")
+    st.success(f"Started {mode} PID={proc.pid} session={session_name}")
 
 
 tab_pipeline, tab_config, tab_edit = st.tabs(["Pipeline", "Config", "Edit Analysis"])
@@ -276,6 +328,11 @@ with tab_pipeline:
 
     auto_refresh = bool(st.session_state["auto_refresh"])
     refresh_sec = int(st.session_state["refresh_sec"])
+    session_layout = str(cfg.get("session_layout", "folder"))
+    if session_layout not in {"folder", "filename"}:
+        session_layout = "folder"
+    configured_session = sanitize_session_name(str(cfg.get("session_name", "")))
+    active_session = sanitize_session_name(str(st.session_state.get("active_session_name", ""))) or configured_session
 
     running = {m: p for m, p in st.session_state["run_pids"].items() if is_pid_running(p)}
     external = detect_build_processes()
@@ -288,9 +345,9 @@ with tab_pipeline:
     else:
         st.caption("No active process.")
 
-    sp = status_path(collection, output_dir)
-    lp = log_path(collection, output_dir)
-    pp = paper_status_path(collection, output_dir)
+    sp = status_path(collection, output_dir, active_session, session_layout)
+    lp = log_path(collection, output_dir, active_session, session_layout)
+    pp = paper_status_path(collection, output_dir, active_session, session_layout)
 
     st.subheader("Current Run Status")
     if not active:
@@ -324,9 +381,9 @@ with tab_pipeline:
             if s in {"render"}:
                 return "3"
             if s == "done":
-                if report_json_path(collection, output_dir).exists():
+                if report_json_path(collection, output_dir, active_session, session_layout).exists():
                     return "3"
-                if global_json_path(collection, output_dir).exists():
+                if global_json_path(collection, output_dir, active_session, session_layout).exists():
                     return "2"
                 return "1"
             return "-"
@@ -342,6 +399,7 @@ with tab_pipeline:
         m5.metric("Current", f"{cur_index}/{cur_total}")
         st.caption(f"Message: {msg}")
         st.caption(f"Paper: {cur_title}")
+        st.caption(f"Session: {active_session or '(none)'}")
 
         render_paper_timeline(paper_rows, limit=30)
 
@@ -354,12 +412,13 @@ with tab_pipeline:
             st.info("No log file yet.")
 
     st.subheader("Outputs")
+    out_dir, out_stem = resolve_session_paths(collection, output_dir, active_session, session_layout)
     for p in [
-        analyze_json_path(collection, output_dir),
-        global_json_path(collection, output_dir),
-        report_json_path(collection, output_dir),
-        Path(output_dir) / f"review_{collection}.md",
-        Path(output_dir) / f"review_{collection}.pptx",
+        analyze_json_path(collection, output_dir, active_session, session_layout),
+        global_json_path(collection, output_dir, active_session, session_layout),
+        report_json_path(collection, output_dir, active_session, session_layout),
+        out_dir / f"{out_stem}.md",
+        out_dir / f"{out_stem}.pptx",
     ]:
         if p.exists():
             st.write(str(p))
@@ -379,6 +438,10 @@ with tab_config:
             try:
                 st.session_state["config_path"] = cfg_path_input
                 st.session_state["cfg"] = load_or_init_config(Path(cfg_path_input))
+                cfg_loaded = st.session_state["cfg"]
+                coll_loaded = sanitize_session_name(str(cfg_loaded.get("collection", ""))) or str(cfg_loaded.get("collection", ""))
+                sess_loaded = sanitize_session_name(str(cfg_loaded.get("session_name", "")))
+                st.session_state["active_session_name"] = sess_loaded or coll_loaded
                 st.success("Config loaded.")
                 st.rerun()
             except Exception as e:
@@ -404,6 +467,15 @@ with tab_config:
         )
         cfg_include_images = st.checkbox("Include Images", value=bool(cfg.get("include_images", True)))
         cfg_output_dir = st.text_input("Output Dir", value=str(cfg.get("output_dir", DEFAULT_OUTPUT)))
+        cfg_session_layout = st.selectbox(
+            "Session Layout",
+            ["folder", "filename"],
+            index=0 if str(cfg.get("session_layout", "folder")) == "folder" else 1,
+        )
+        cfg_session_name = st.text_input(
+            "Session Name (empty = auto on Step 1)",
+            value=str(cfg.get("session_name", "")),
+        )
     with c2:
         llm_modes = ["off", "codex_cli", "openai_compatible"]
         cur_mode = str(cfg.get("llm_mode", "codex_cli"))
@@ -411,6 +483,10 @@ with tab_config:
         cfg_llm_mode = st.selectbox("LLM Mode", llm_modes, index=cur_index)
         cfg_llm_model = st.text_input("LLM Model", value=str(cfg.get("llm_model", "gpt-5-mini")))
         cfg_llm_base_url = st.text_input("LLM Base URL", value=str(cfg.get("llm_base_url", "http://127.0.0.1:11434/v1")))
+        cfg_codex_bin = st.text_input(
+            "Codex Bin",
+            value=str(cfg.get("codex_bin", "/Applications/Codex.app/Contents/Resources/codex")),
+        )
         cfg_llm_timeout_sec = st.number_input(
             "LLM Timeout (sec)",
             min_value=30,
@@ -463,7 +539,11 @@ with tab_config:
             subprocess.run(["pkill", "-f", "build_litreview.py"], check=False)
             for k in list(st.session_state["run_pids"].keys()):
                 st.session_state["run_pids"][k] = None
-            clear_runtime_state(collection, output_dir)
+            active = sanitize_session_name(str(st.session_state.get("active_session_name", ""))) or sanitize_session_name(
+                str(cfg.get("session_name", ""))
+            )
+            layout = str(cfg.get("session_layout", "folder"))
+            clear_runtime_state(collection, output_dir, active, layout)
             st.success("Stop signal sent.")
         except Exception as e:
             st.error(f"Stop failed: {e}")
@@ -476,9 +556,12 @@ with tab_config:
                 "cluster_k": int(cfg_cluster_k),
                 "include_images": bool(cfg_include_images),
                 "output_dir": cfg_output_dir,
+                "session_layout": cfg_session_layout,
+                "session_name": sanitize_session_name(cfg_session_name),
                 "llm_mode": cfg_llm_mode,
                 "llm_model": cfg_llm_model,
                 "llm_base_url": cfg_llm_base_url,
+                "codex_bin": cfg_codex_bin.strip(),
                 "llm_timeout_sec": int(cfg_llm_timeout_sec),
                 "llm_max_input_chars": int(cfg_llm_max_input_chars),
                 "llm_max_tokens": int(cfg_llm_max_tokens),
@@ -493,13 +576,22 @@ with tab_config:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(json.dumps(new_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
             st.session_state["cfg"] = new_cfg
+            coll_new = sanitize_session_name(str(new_cfg.get("collection", ""))) or str(new_cfg.get("collection", ""))
+            sess_new = sanitize_session_name(str(new_cfg.get("session_name", "")))
+            st.session_state["active_session_name"] = sess_new or coll_new
             st.success("Config saved and applied.")
         except Exception as e:
             st.error(f"Save failed: {e}")
 
 with tab_edit:
     st.subheader("Edit Per-Paper Analysis Data")
-    rp = analyze_json_path(collection, output_dir)
+    session_layout = str(cfg.get("session_layout", "folder"))
+    if session_layout not in {"folder", "filename"}:
+        session_layout = "folder"
+    active_session = sanitize_session_name(str(st.session_state.get("active_session_name", ""))) or sanitize_session_name(
+        str(cfg.get("session_name", ""))
+    )
+    rp = analyze_json_path(collection, output_dir, active_session, session_layout)
     st.code(str(rp), language="text")
     running_now = {m: p for m, p in st.session_state["run_pids"].items() if is_pid_running(p)}
     external_now = detect_build_processes()
@@ -508,7 +600,7 @@ with tab_edit:
 
     if not rp.exists():
         st.warning("Analyze JSON not found yet. Showing preview from paper_status.jsonl if available.")
-        pp = paper_status_path(collection, output_dir)
+        pp = paper_status_path(collection, output_dir, active_session, session_layout)
         rows = read_jsonl(pp)
         parsed_rows = [r for r in rows if r.get("status") == "parsed"]
         if parsed_rows:

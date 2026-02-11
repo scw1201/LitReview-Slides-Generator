@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -74,6 +75,7 @@ class LLMClient:
         model: str,
         base_url: str,
         api_key: Optional[str],
+        codex_bin: Optional[str],
         timeout_sec: int,
         max_input_chars: int,
         max_tokens: int,
@@ -82,6 +84,7 @@ class LLMClient:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self.codex_bin = self._resolve_codex_bin(codex_bin)
         self.timeout_sec = timeout_sec
         self.max_input_chars = max_input_chars
         self.max_tokens = max_tokens
@@ -91,8 +94,24 @@ class LLMClient:
     @property
     def enabled(self) -> bool:
         if self.mode == "codex_cli":
-            return True
+            return bool(self.codex_bin)
         return self.mode == "openai_compatible" and bool(self.api_key)
+
+    def _resolve_codex_bin(self, configured: Optional[str]) -> str:
+        c = (configured or "").strip()
+        if c and Path(c).exists():
+            return c
+        found = shutil.which("codex")
+        if found:
+            return found
+        candidates = [
+            "/Applications/Codex.app/Contents/Resources/codex",
+            str(Path.home() / ".local" / "bin" / "codex"),
+        ]
+        for x in candidates:
+            if Path(x).exists():
+                return x
+        return "codex"
 
     def _extract_json_obj(self, text: str) -> Optional[Dict[str, Any]]:
         text = (text or "").strip()
@@ -127,7 +146,7 @@ class LLMClient:
         with tempfile.TemporaryDirectory(prefix="litreview_codex_") as td:
             out_file = Path(td) / "last_message.txt"
             cmd = [
-                "codex",
+                self.codex_bin,
                 "exec",
                 prompt[: self.max_input_chars],
                 "--model",
@@ -324,12 +343,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--llm_model", default="gpt-5-mini")
     p.add_argument("--llm_base_url", default="https://api.openai.com/v1")
     p.add_argument("--llm_api_key_env", default="OPENAI_API_KEY")
+    p.add_argument("--codex_bin", default="", help="Path to codex executable for llm_mode=codex_cli")
     p.add_argument("--llm_timeout_sec", type=int, default=180)
     p.add_argument("--llm_max_input_chars", type=int, default=12000)
     p.add_argument("--llm_max_tokens", type=int, default=180)
     p.add_argument("--zotero_db", default=str(Path.home() / "Zotero" / "zotero.sqlite"))
     p.add_argument("--zotero_storage_dir", default=str(Path.home() / "Zotero" / "storage"))
     p.add_argument("--output_dir", default="/Users/la/Desktop/research_skills/")
+    p.add_argument("--session_name", default="", help="Session id/name for this run")
+    p.add_argument(
+        "--session_layout",
+        choices=["folder", "filename"],
+        default="folder",
+        help="folder: output_dir/session_name, filename: append session_name to files",
+    )
     p.add_argument("--analyze_json", default="", help="Path to per-paper analysis JSON")
     p.add_argument("--global_json", default="", help="Path to global synthesis JSON")
     p.add_argument("--config_json", default="", help="Optional config JSON; CLI args override missing keys only")
@@ -423,10 +450,13 @@ def apply_config_defaults(args: argparse.Namespace, cfg: Dict[str, Any]) -> None
         "llm_mode": "codex_cli",
         "llm_model": "gpt-5-mini",
         "llm_base_url": "https://api.openai.com/v1",
+        "codex_bin": "",
         "llm_timeout_sec": 180,
         "llm_max_input_chars": 12000,
         "llm_max_tokens": 180,
         "output_dir": "/Users/la/Desktop/research_skills/",
+        "session_name": "",
+        "session_layout": "folder",
         "section_map_json": "",
     }
     for k, default_v in defaults.items():
@@ -453,6 +483,31 @@ def validate_args(args: argparse.Namespace) -> None:
         p = Path(args.section_map_json)
         if not p.exists():
             raise ValueError(f"section map not found: {p}")
+
+
+def sanitize_session_name(name: str) -> str:
+    text = (name or "").strip()
+    if not text:
+        return ""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("._-")
+
+
+def resolve_session_context(args: argparse.Namespace) -> Tuple[Path, str, str]:
+    collection_dir = sanitize_session_name(str(getattr(args, "collection", ""))) or str(getattr(args, "collection", "collection"))
+    session_name = sanitize_session_name(getattr(args, "session_name", ""))
+    base_stem = f"review_{args.collection}"
+    output_root = Path(args.output_dir)
+    if str(getattr(args, "session_layout", "folder")) == "filename":
+        if not session_name:
+            session_name = collection_dir
+        return output_root, f"{base_stem}.{session_name}", session_name
+    # Default folder layout: one collection => one folder.
+    # output_dir/<collection>/...
+    if not session_name or session_name == collection_dir:
+        return output_root / collection_dir, base_stem, collection_dir
+    # Optional sub-session under collection folder.
+    # output_dir/<collection>/<session>/...
+    return output_root / collection_dir / session_name, base_stem, session_name
 
 
 def load_section_patterns(path: Optional[Path]) -> Dict[str, List[str]]:
@@ -1937,12 +1992,12 @@ def render_ppt(output: Path, overview: List[Dict], papers: List[Dict], final_syn
     return None
 
 
-def get_stage_paths(args: argparse.Namespace, output_dir: Path) -> Dict[str, Path]:
-    analyze_json = Path(args.analyze_json) if args.analyze_json else output_dir / f"review_{args.collection}.analyze.json"
-    global_json = Path(args.global_json) if args.global_json else output_dir / f"review_{args.collection}.global.json"
-    report_json = output_dir / f"review_{args.collection}.json"
-    out_md = output_dir / f"review_{args.collection}.md"
-    out_pptx = output_dir / f"review_{args.collection}.pptx"
+def get_stage_paths(args: argparse.Namespace, output_dir: Path, stem: str) -> Dict[str, Path]:
+    analyze_json = Path(args.analyze_json) if args.analyze_json else output_dir / f"{stem}.analyze.json"
+    global_json = Path(args.global_json) if args.global_json else output_dir / f"{stem}.global.json"
+    report_json = output_dir / f"{stem}.json"
+    out_md = output_dir / f"{stem}.md"
+    out_pptx = output_dir / f"{stem}.pptx"
     return {
         "analyze_json": analyze_json,
         "global_json": global_json,
@@ -1972,22 +2027,26 @@ def main() -> int:
         if args.verbose:
             print(msg, flush=True)
 
-    output_dir = Path(args.output_dir)
+    output_dir, file_stem, session_name = resolve_session_context(args)
+    args.session_name = session_name
     output_dir.mkdir(parents=True, exist_ok=True)
-    status_file = Path(args.status_file) if args.status_file else output_dir / f"review_{args.collection}.status.json"
-    log_file = Path(args.log_file) if args.log_file else output_dir / f"review_{args.collection}.run.log"
+    status_file = Path(args.status_file) if args.status_file else output_dir / f"{file_stem}.status.json"
+    log_file = Path(args.log_file) if args.log_file else output_dir / f"{file_stem}.run.log"
     paper_status_file = (
         Path(args.paper_status_file)
         if args.paper_status_file
-        else output_dir / f"review_{args.collection}.paper_status.jsonl"
+        else output_dir / f"{file_stem}.paper_status.jsonl"
     )
-    paths = get_stage_paths(args, output_dir)
+    paths = get_stage_paths(args, output_dir, file_stem)
     try:
         paper_status_file.unlink(missing_ok=True)
     except Exception:
         pass
-    append_log(log_file, f"start collection={args.collection} mode={args.mode} llm_mode={args.llm_mode}")
-    vprint(f"[start] collection={args.collection} mode={args.mode} llm_mode={args.llm_mode}")
+    append_log(
+        log_file,
+        f"start collection={args.collection} mode={args.mode} llm_mode={args.llm_mode} session={session_name}",
+    )
+    vprint(f"[start] collection={args.collection} mode={args.mode} llm_mode={args.llm_mode} session={session_name}")
     write_status(
         status_file,
         stage="init",
@@ -1995,6 +2054,7 @@ def main() -> int:
         progress_current=0,
         progress_total=100,
         message="初始化参数与路径",
+        extra={"session_name": session_name, "session_output_dir": str(output_dir)},
     )
 
     include_images = parse_bool(args.include_images)
@@ -2004,10 +2064,16 @@ def main() -> int:
         model=args.llm_model,
         base_url=args.llm_base_url,
         api_key=llm_api_key,
+        codex_bin=args.codex_bin,
         timeout_sec=args.llm_timeout_sec,
         max_input_chars=args.llm_max_input_chars,
         max_tokens=args.llm_max_tokens,
     )
+    if args.llm_mode == "codex_cli" and not llm_client.enabled:
+        print(
+            "[warn] llm_mode=codex_cli but codex executable not found; fallback to rule-based mode",
+            file=sys.stderr,
+        )
     if args.llm_mode == "openai_compatible" and not llm_client.enabled:
         print(
             f"[warn] llm mode requested but api key env '{args.llm_api_key_env}' is empty; fallback to rule-based mode",
@@ -2041,7 +2107,7 @@ def main() -> int:
                     zotero_storage_dir=Path(args.zotero_storage_dir),
                 )
                 manifest_source = "zotero_db"
-                manifest_out = output_dir / f"review_{args.collection}.manifest.json"
+                manifest_out = output_dir / f"{file_stem}.manifest.json"
                 manifest_out.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
                 print(f"[ok] wrote {manifest_out}")
                 append_log(log_file, f"manifest generated: {manifest_out}")
@@ -2145,6 +2211,8 @@ def main() -> int:
             )
         analyze_payload = {
             "run_config": vars(args),
+            "session_name": session_name,
+            "session_output_dir": str(output_dir),
             "collection_info": {"collection": args.collection, "manifest_source": manifest_source},
             "paper_count_total": len(items),
             "paper_count_processed": len([p for p in papers if not p.get("parse_failed")]),
@@ -2190,6 +2258,8 @@ def main() -> int:
         quality = run_quality_gates(processable, overview, final_syn)
         global_payload = {
             "run_config": vars(args),
+            "session_name": session_name,
+            "session_output_dir": str(output_dir),
             "collection_info": analyze_payload.get("collection_info", {"collection": args.collection}),
             "paper_count_processed": len(processable),
             "cluster_k_requested": args.cluster_k,
