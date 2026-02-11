@@ -55,5 +55,5 @@ OPENAI_API_KEY=ollama python3 /Users/la/Desktop/check_code/zotero-pdf-to-litrevi
 
 ## Notes
 
-- This is now a standard project layout, not a Codex Skill package.
+- This branch can be used as a Codex Skill package (`SKILL.md` + `agents/openai.yaml`).
 - No external paper download is required; local Zotero PDFs are used.

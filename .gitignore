@@ -12,3 +12,5 @@ review_*.status.json
 review_*.paper_status.jsonl
 review_*.manifest.json
 _images/
+
+config/pipeline.json.*.bak
