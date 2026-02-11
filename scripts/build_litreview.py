@@ -1929,11 +1929,25 @@ def section_bullets_text(entries: List[Dict], max_n: int, language: str) -> str:
     return "\n".join(lines)
 
 
+def pick_figure_caption(captions: List[str], language: str) -> str:
+    if not captions:
+        return ""
+    for c in captions:
+        text = re.sub(r"\s+", " ", str(c)).strip()
+        if re.search(r"\b(fig(?:ure)?\.?\s*1|图\s*1)\b", text, re.I):
+            return truncate_line(text, language, 68, 30)
+    first = re.sub(r"\s+", " ", str(captions[0])).strip()
+    return truncate_line(first, language, 68, 30)
+
+
 def render_ppt(output: Path, overview: List[Dict], papers: List[Dict], final_syn: Dict, language: str) -> Optional[str]:
     if Presentation is None:
         return "python-pptx not installed; skipped pptx output"
 
     prs = Presentation()
+    # 16:9
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
     blue = RGBColor(0, 162, 232)
     black = RGBColor(0, 0, 0)
 
@@ -1982,23 +1996,25 @@ def render_ppt(output: Path, overview: List[Dict], papers: List[Dict], final_syn
             ("主要贡献", "main_contributions", 4),
         ]:
             add_textbox(slide, 7.0, y_right, 5.8, 0.35, section_title if language == "zh" else section_title, 15, True, black)
-            y_right += 0.28
+            y_right += 0.24
             block = section_bullets_text(p.get(section_key, []), max_n, language)
             block_h = 0.45 + 0.35 * max(1, len([x for x in p.get(section_key, [])[:max_n] if x.get("text")]))
             add_textbox(slide, 7.2, y_right, 5.5, block_h, block, 13, False, black, line_spacing=1.35)
-            y_right += block_h - 0.05
-            y_right += 0.15
+            y_right += block_h + 0.04
 
         add_textbox(slide, 0.6, 1.8, 6.0, 0.35, "图像" if language == "zh" else "Image", 15, True, black)
         if p.get("image_path") and Path(p["image_path"]).exists():
             slide.shapes.add_picture(str(p["image_path"]), Inches(0.6), Inches(2.1), width=Inches(5.8), height=Inches(3.4))
         else:
             add_textbox(slide, 0.8, 3.25, 5.2, 0.5, "图像未提取到" if language == "zh" else "Image not extracted", 14, False, RGBColor(100, 100, 100))
+        fig_caption = pick_figure_caption(p.get("figure_captions", []), language)
+        if fig_caption:
+            add_textbox(slide, 0.6, 5.52, 6.0, 0.28, fig_caption, 10, False, RGBColor(120, 120, 120))
 
-        add_textbox(slide, 0.6, 5.7, 6.0, 0.35, "局限" if language == "zh" else "Limitations", 15, True, black)
-        y_l = 6.0
+        add_textbox(slide, 0.6, 5.88, 6.0, 0.35, "局限" if language == "zh" else "Limitations", 15, True, black)
+        y_l = 6.18
         lim_block = section_bullets_text(p.get("limitations", []), 3, language)
-        add_textbox(slide, 0.8, y_l, 5.8, 1.25, lim_block, 12, False, black, line_spacing=1.35)
+        add_textbox(slide, 0.8, y_l, 5.8, 1.0, lim_block, 12, False, black, line_spacing=1.35)
 
     # Part 3
     slide = prs.slides.add_slide(prs.slide_layouts[6])
