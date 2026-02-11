@@ -325,7 +325,123 @@ class LLMClient:
             socket.timeout,
         ) as e:
             self.last_error = f"{type(e).__name__}: {e}"
-            return None
+        return None
+
+
+class ZoteroMcpRagClient:
+    def __init__(
+        self,
+        enabled: bool,
+        python_bin: str,
+        config_path: str,
+        use_local: bool = True,
+        timeout_sec: int = 120,
+    ):
+        self.enabled = enabled
+        self.python_bin = self._resolve_python_bin(python_bin)
+        self.config_path = config_path.strip()
+        self.use_local = use_local
+        self.timeout_sec = timeout_sec
+        self.last_error = ""
+
+    def _resolve_python_bin(self, configured: str) -> str:
+        c = (configured or "").strip()
+        if c and Path(c).exists():
+            return c
+        # Preferred known installation path from uv tool.
+        preferred = str(Path.home() / ".local" / "share" / "uv" / "tools" / "zotero-mcp" / "bin" / "python")
+        if Path(preferred).exists():
+            return preferred
+        return sys.executable
+
+    def search(self, query: str, limit: int) -> List[Dict[str, Any]]:
+        self.last_error = ""
+        if not self.enabled:
+            return []
+        q = (query or "").strip()
+        if not q:
+            return []
+        script = r"""
+import json, sys
+from zotero_mcp.semantic_search import ZoteroSemanticSearch
+query = sys.argv[1]
+limit = int(sys.argv[2])
+config_path = sys.argv[3] if len(sys.argv) > 3 else ""
+if config_path:
+    s = ZoteroSemanticSearch(config_path=config_path)
+else:
+    s = ZoteroSemanticSearch()
+r = s.search(query, limit=limit)
+print(json.dumps(r, ensure_ascii=False))
+"""
+        cmd = [self.python_bin, "-c", script, q, str(max(1, int(limit))), self.config_path]
+        run_env = os.environ.copy()
+        if self.use_local:
+            run_env["ZOTERO_LOCAL"] = "true"
+            run_env.setdefault("NO_PROXY", "localhost,127.0.0.1,::1")
+            run_env.setdefault("no_proxy", "localhost,127.0.0.1,::1")
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_sec,
+                check=False,
+                env=run_env,
+            )
+        except subprocess.TimeoutExpired:
+            self.last_error = "rag_timeout"
+            return []
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
+            return []
+
+        if proc.returncode != 0:
+            err = (proc.stderr or "").strip()
+            self.last_error = err or f"rag_exit_{proc.returncode}"
+            return []
+        try:
+            payload = json.loads((proc.stdout or "").strip() or "{}")
+        except Exception as e:
+            self.last_error = f"rag_json_parse_error: {e}"
+            return []
+        return self._normalize_results(payload)
+
+    def _normalize_results(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list):
+            return []
+        out: List[Dict[str, Any]] = []
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            meta = r.get("metadata", {}) if isinstance(r.get("metadata"), dict) else {}
+            title = str(r.get("title") or meta.get("title") or "").strip()
+            snippet = str(
+                r.get("snippet")
+                or r.get("content")
+                or r.get("document")
+                or meta.get("snippet")
+                or ""
+            ).strip()
+            item_key = str(r.get("item_key") or meta.get("item_key") or meta.get("key") or "").strip()
+            score_raw = r.get("score", r.get("similarity", r.get("distance")))
+            score = None
+            try:
+                score = float(score_raw)
+            except Exception:
+                score = None
+            if not title and not snippet:
+                continue
+            out.append(
+                {
+                    "title": title,
+                    "snippet": snippet,
+                    "item_key": item_key,
+                    "score": score,
+                }
+            )
+        return out
 
 
 def parse_args() -> argparse.Namespace:
@@ -347,6 +463,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--llm_timeout_sec", type=int, default=180)
     p.add_argument("--llm_max_input_chars", type=int, default=12000)
     p.add_argument("--llm_max_tokens", type=int, default=180)
+    p.add_argument("--rag_enabled", type=str, default="false")
+    p.add_argument("--rag_top_k", type=int, default=8)
+    p.add_argument("--rag_python_bin", default="", help="Python path with zotero_mcp installed")
+    p.add_argument("--rag_config_path", default="", help="Optional semantic search config path for zotero-mcp")
+    p.add_argument("--rag_use_local", type=str, default="true", help="Set ZOTERO_LOCAL=true for RAG subprocess")
     p.add_argument("--zotero_db", default=str(Path.home() / "Zotero" / "zotero.sqlite"))
     p.add_argument("--zotero_storage_dir", default=str(Path.home() / "Zotero" / "storage"))
     p.add_argument("--output_dir", default="outputs")
@@ -454,6 +575,11 @@ def apply_config_defaults(args: argparse.Namespace, cfg: Dict[str, Any]) -> None
         "llm_timeout_sec": 180,
         "llm_max_input_chars": 12000,
         "llm_max_tokens": 180,
+        "rag_enabled": "false",
+        "rag_top_k": 8,
+        "rag_python_bin": "",
+        "rag_config_path": "",
+        "rag_use_local": "true",
         "output_dir": "outputs",
         "session_name": "",
         "session_layout": "folder",
@@ -477,6 +603,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--llm_max_input_chars must be >= 1000")
     if args.llm_max_tokens < 32:
         raise ValueError("--llm_max_tokens must be >= 32")
+    if args.rag_top_k < 1 or args.rag_top_k > 50:
+        raise ValueError("--rag_top_k must be in [1, 50]")
     if args.cluster_k < 0:
         raise ValueError("--cluster_k must be >= 0")
     if args.section_map_json:
@@ -1633,16 +1761,59 @@ def compose_cluster_summary(cluster_papers_: List[Dict], language: str) -> Dict:
     }
 
 
+def build_cluster_rag_query(cluster_papers_: List[Dict], language: str) -> str:
+    titles = [str(p.get("title", "")).strip() for p in cluster_papers_ if str(p.get("title", "")).strip()]
+    kws: List[str] = []
+    for p in cluster_papers_:
+        for k in p.get("keywords", []) or []:
+            kk = str(k).strip()
+            if kk:
+                kws.append(kk)
+    uniq_kws = []
+    seen = set()
+    for k in kws:
+        low = k.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        uniq_kws.append(k)
+    title_part = "; ".join(titles[:3])
+    kw_part = ", ".join(uniq_kws[:12])
+    if language == "zh":
+        return f"主题综述检索：{title_part}。关键词：{kw_part}"
+    return f"Literature synthesis query: {title_part}. Keywords: {kw_part}"
+
+
+def format_rag_hits_for_prompt(hits: List[Dict[str, Any]], language: str, max_hits: int = 6) -> str:
+    if not hits:
+        return ""
+    lines = []
+    for h in hits[:max_hits]:
+        title = str(h.get("title", "")).strip() or "unknown"
+        snippet = truncate_line(str(h.get("snippet", "")).strip(), language, 100, 48)
+        score = h.get("score")
+        score_text = f"{score:.4f}" if isinstance(score, float) else "na"
+        lines.append(f"- {title} | score={score_text} | evidence={snippet}")
+    return "\n".join(lines)
+
+
 def make_overview(
     clusters: Dict[int, List[int]],
     papers: List[Dict],
     language: str,
     llm_client: Optional[LLMClient] = None,
+    rag_client: Optional[ZoteroMcpRagClient] = None,
+    rag_top_k: int = 8,
 ) -> List[Dict]:
     out = []
     for cid, idxs in clusters.items():
         cluster_set = [papers[i] for i in idxs]
         s = compose_cluster_summary(cluster_set, language)
+        rag_query = ""
+        rag_hits: List[Dict[str, Any]] = []
+        if rag_client and rag_client.enabled:
+            rag_query = build_cluster_rag_query(cluster_set, language)
+            rag_hits = rag_client.search(rag_query, rag_top_k)
         if llm_client and llm_client.enabled:
             prompt_lang = "中文" if language == "zh" else "English"
             cluster_briefs = []
@@ -1663,6 +1834,9 @@ def make_overview(
                 "禁止逐篇拼接，不要长段落，每项一句。\n"
                 f"cluster_papers={json.dumps(cluster_briefs, ensure_ascii=False)}"
             )
+            rag_text = format_rag_hits_for_prompt(rag_hits, language, max_hits=min(6, rag_top_k))
+            if rag_text:
+                llm_user += f"\n补充RAG证据（优先参考但需保持跨论文抽象）：\n{rag_text}"
             llm_resp = llm_client.complete_json(llm_system, llm_user)
             if isinstance(llm_resp, dict):
                 s = {
@@ -1677,6 +1851,8 @@ def make_overview(
                 "core_problem": s["core_problem"],
                 "main_tech_path": s["main_tech_path"],
                 "typical_limits": s["typical_limits"],
+                "rag_query": rag_query,
+                "rag_hits": rag_hits[:rag_top_k],
             }
         )
     return out
@@ -1686,6 +1862,7 @@ def make_final_synthesis(
     clusters_summary: List[Dict],
     language: str,
     llm_client: Optional[LLMClient] = None,
+    rag_enabled: bool = False,
 ) -> Dict:
     if language == "zh":
         core = "现有工作围绕任务可行性与泛化能力展开，主线集中在表示设计、学习策略与数据机制。"
@@ -1728,6 +1905,27 @@ def make_final_synthesis(
             "要求：跨论文归纳，避免空话，适合组会PPT。\n"
             f"clusters_summary={json.dumps(clusters_summary, ensure_ascii=False)}"
         )
+        if rag_enabled:
+            rag_briefs = []
+            for c in clusters_summary:
+                hits = c.get("rag_hits", [])
+                if not isinstance(hits, list):
+                    continue
+                rag_briefs.append(
+                    {
+                        "cluster_id": c.get("cluster_id"),
+                        "evidence": [
+                            {
+                                "title": h.get("title", ""),
+                                "snippet": truncate_line(str(h.get("snippet", "")), language, 90, 45),
+                            }
+                            for h in hits[:4]
+                            if isinstance(h, dict)
+                        ],
+                    }
+                )
+            if rag_briefs:
+                llm_user += f"\n补充RAG证据（用于支撑gap归纳）：{json.dumps(rag_briefs, ensure_ascii=False)}"
         llm_resp = llm_client.complete_json(llm_system, llm_user)
         if isinstance(llm_resp, dict):
             maybe_gaps = llm_resp.get("possible_research_gaps")
@@ -2140,6 +2338,14 @@ def main() -> int:
             f"[warn] llm mode requested but api key env '{args.llm_api_key_env}' is empty; fallback to rule-based mode",
             file=sys.stderr,
         )
+    rag_enabled = parse_bool(args.rag_enabled)
+    rag_client = ZoteroMcpRagClient(
+        enabled=rag_enabled,
+        python_bin=args.rag_python_bin,
+        config_path=args.rag_config_path,
+        use_local=parse_bool(args.rag_use_local),
+        timeout_sec=max(30, int(args.llm_timeout_sec)),
+    )
     write_status(
         status_file,
         stage="manifest",
@@ -2311,11 +2517,23 @@ def main() -> int:
             status="running",
             progress_current=82,
             progress_total=100,
-            message="聚类与跨论文总结",
+            message="聚类与跨论文总结（RAG增强）" if rag_enabled else "聚类与跨论文总结",
         )
         clusters = cluster_papers(processable, forced_k=args.cluster_k)
-        overview = make_overview(clusters, processable, args.language, llm_client=llm_client)
-        final_syn = make_final_synthesis(overview, args.language, llm_client=llm_client)
+        overview = make_overview(
+            clusters,
+            processable,
+            args.language,
+            llm_client=llm_client,
+            rag_client=rag_client if rag_enabled else None,
+            rag_top_k=args.rag_top_k,
+        )
+        final_syn = make_final_synthesis(
+            overview,
+            args.language,
+            llm_client=llm_client,
+            rag_enabled=rag_enabled,
+        )
         quality = run_quality_gates(processable, overview, final_syn)
         global_payload = {
             "run_config": vars(args),
@@ -2328,6 +2546,14 @@ def main() -> int:
             "clusters": overview,
             "final_synthesis": final_syn,
             "quality_gate_results": quality,
+            "rag": {
+                "enabled": rag_enabled,
+                "top_k": args.rag_top_k,
+                "python_bin": rag_client.python_bin,
+                "config_path": args.rag_config_path,
+                "use_local": parse_bool(args.rag_use_local),
+                "last_error": rag_client.last_error,
+            },
         }
         paths["global_json"].write_text(json.dumps(global_payload, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[ok] wrote {paths['global_json']}")

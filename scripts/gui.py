@@ -134,6 +134,11 @@ def default_config() -> Dict[str, Any]:
         "llm_timeout_sec": 180,
         "llm_max_input_chars": 4000,
         "llm_max_tokens": 512,
+        "rag_enabled": False,
+        "rag_top_k": 8,
+        "rag_python_bin": "",
+        "rag_config_path": "",
+        "rag_use_local": True,
         "section_map_json": DEFAULT_SECTION_MAP,
     }
 
@@ -510,6 +515,23 @@ with tab_config:
             value=int(cfg.get("llm_max_tokens", 512)),
             step=32,
         )
+        cfg_rag_enabled = st.checkbox("Enable RAG in Global Stage", value=bool(cfg.get("rag_enabled", False)))
+        cfg_rag_top_k = st.number_input(
+            "RAG Top K",
+            min_value=1,
+            max_value=50,
+            value=int(cfg.get("rag_top_k", 8)),
+            step=1,
+        )
+        cfg_rag_python_bin = st.text_input(
+            "RAG Python Bin (zotero-mcp env)",
+            value=str(cfg.get("rag_python_bin", "")),
+        )
+        cfg_rag_config_path = st.text_input(
+            "RAG Config Path (optional)",
+            value=str(cfg.get("rag_config_path", "")),
+        )
+        cfg_rag_use_local = st.checkbox("RAG Use Local Zotero (ZOTERO_LOCAL=true)", value=bool(cfg.get("rag_use_local", True)))
 
     cfg_section_map_json = st.text_input(
         "Section Map JSON",
@@ -567,6 +589,11 @@ with tab_config:
                 "llm_timeout_sec": int(cfg_llm_timeout_sec),
                 "llm_max_input_chars": int(cfg_llm_max_input_chars),
                 "llm_max_tokens": int(cfg_llm_max_tokens),
+                "rag_enabled": bool(cfg_rag_enabled),
+                "rag_top_k": int(cfg_rag_top_k),
+                "rag_python_bin": cfg_rag_python_bin.strip(),
+                "rag_config_path": cfg_rag_config_path.strip(),
+                "rag_use_local": bool(cfg_rag_use_local),
                 "section_map_json": cfg_section_map_json,
             }
             st.session_state["config_path"] = cfg_path_input

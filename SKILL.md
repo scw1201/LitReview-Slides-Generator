@@ -61,6 +61,17 @@ python3 scripts/build_litreview.py \
 
 Use `--llm_mode codex_cli` in all stages so content generation is done by Codex.
 
+## Optional RAG for Stage 2
+
+If `zotero-mcp` semantic DB is available, enable RAG in pipeline config:
+
+- `rag_enabled=true`
+- `rag_top_k=8` (adjust as needed)
+- `rag_python_bin` optional (python with `zotero_mcp` installed)
+- `rag_config_path` optional
+
+RAG only enhances Stage 2 (`global`) and falls back safely on failure.
+
 ## Key Files
 
 - `scripts/build_litreview.py`

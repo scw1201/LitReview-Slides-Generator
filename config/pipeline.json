@@ -14,5 +14,10 @@
   "llm_timeout_sec": 180,
   "llm_max_input_chars": 4000,
   "llm_max_tokens": 512,
+  "rag_enabled": false,
+  "rag_top_k": 8,
+  "rag_python_bin": "",
+  "rag_config_path": "",
+  "rag_use_local": true,
   "section_map_json": "config/section_map.default.json"
 }

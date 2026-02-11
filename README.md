@@ -108,6 +108,31 @@ Set key env var if required by your endpoint:
 export OPENAI_API_KEY=your_key
 ```
 
+## Optional: RAG-Enhanced Global Synthesis (zotero-mcp)
+
+This project can use `zotero-mcp` semantic search to improve **Stage 2 (global)** direction and gap synthesis.
+
+Recommended one-time index build:
+
+```bash
+zotero-mcp setup --semantic-config-only
+zotero-mcp update-db --fulltext --force-rebuild
+zotero-mcp db-status
+```
+
+Enable in config (`config/pipeline.json`) or GUI:
+
+- `rag_enabled`: `true/false`
+- `rag_top_k`: semantic retrieval hits per cluster
+- `rag_python_bin`: Python path where `zotero_mcp` is installed (optional)
+- `rag_config_path`: semantic config path (optional)
+- `rag_use_local`: run retrieval with `ZOTERO_LOCAL=true` (recommended for local Zotero)
+
+Behavior:
+
+- RAG is used only in Stage 2 (`global`) to provide extra evidence for cluster-level synthesis.
+- If RAG fails (environment/index issue), pipeline does **not** crash; it falls back to non-RAG synthesis and records error in `global.json.rag.last_error`.
+
 ## Notes
 
 - No external paper download is required.
