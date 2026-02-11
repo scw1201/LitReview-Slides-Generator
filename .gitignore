@@ -1,0 +1,14 @@
+.DS_Store
+__pycache__/
+*.pyc
+.streamlit/
+
+# Generated outputs
+review_*.json
+review_*.md
+review_*.pptx
+review_*.run.log
+review_*.status.json
+review_*.paper_status.jsonl
+review_*.manifest.json
+_images/
