@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .streamlit/
+.venv/
 
 # Generated outputs
 review_*.json
@@ -12,5 +13,17 @@ review_*.status.json
 review_*.paper_status.jsonl
 review_*.manifest.json
 _images/
+outputs/
+.rag_home/
+*.log
+*.status.json
+*.paper_status.jsonl
+*.manifest.json
+*.analyze.json
+*.global.json
 
 config/pipeline.json.*.bak
+*.bak
+*.tmp
+*.swp
+.~*

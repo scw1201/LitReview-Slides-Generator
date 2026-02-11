@@ -334,12 +334,16 @@ class ZoteroMcpRagClient:
         enabled: bool,
         python_bin: str,
         config_path: str,
+        home_dir: str,
+        zotero_db_path: str,
         use_local: bool = True,
         timeout_sec: int = 120,
     ):
         self.enabled = enabled
         self.python_bin = self._resolve_python_bin(python_bin)
         self.config_path = config_path.strip()
+        self.home_dir = home_dir.strip()
+        self.zotero_db_path = zotero_db_path.strip()
         self.use_local = use_local
         self.timeout_sec = timeout_sec
         self.last_error = ""
@@ -367,19 +371,27 @@ from zotero_mcp.semantic_search import ZoteroSemanticSearch
 query = sys.argv[1]
 limit = int(sys.argv[2])
 config_path = sys.argv[3] if len(sys.argv) > 3 else ""
+db_path = sys.argv[4] if len(sys.argv) > 4 else ""
+kwargs = {}
+if db_path:
+    kwargs["db_path"] = db_path
 if config_path:
-    s = ZoteroSemanticSearch(config_path=config_path)
+    s = ZoteroSemanticSearch(config_path=config_path, **kwargs)
 else:
-    s = ZoteroSemanticSearch()
+    s = ZoteroSemanticSearch(**kwargs)
 r = s.search(query, limit=limit)
 print(json.dumps(r, ensure_ascii=False))
 """
-        cmd = [self.python_bin, "-c", script, q, str(max(1, int(limit))), self.config_path]
+        cmd = [self.python_bin, "-c", script, q, str(max(1, int(limit))), self.config_path, self.zotero_db_path]
         run_env = os.environ.copy()
         if self.use_local:
             run_env["ZOTERO_LOCAL"] = "true"
             run_env.setdefault("NO_PROXY", "localhost,127.0.0.1,::1")
             run_env.setdefault("no_proxy", "localhost,127.0.0.1,::1")
+        if self.home_dir:
+            hd = Path(self.home_dir).expanduser()
+            hd.mkdir(parents=True, exist_ok=True)
+            run_env["HOME"] = str(hd)
         try:
             proc = subprocess.run(
                 cmd,
@@ -467,6 +479,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rag_top_k", type=int, default=8)
     p.add_argument("--rag_python_bin", default="", help="Python path with zotero_mcp installed")
     p.add_argument("--rag_config_path", default="", help="Optional semantic search config path for zotero-mcp")
+    p.add_argument("--rag_home_dir", default=".rag_home", help="Home dir for zotero-mcp semantic DB (writable path)")
     p.add_argument("--rag_use_local", type=str, default="true", help="Set ZOTERO_LOCAL=true for RAG subprocess")
     p.add_argument("--zotero_db", default=str(Path.home() / "Zotero" / "zotero.sqlite"))
     p.add_argument("--zotero_storage_dir", default=str(Path.home() / "Zotero" / "storage"))
@@ -579,6 +592,7 @@ def apply_config_defaults(args: argparse.Namespace, cfg: Dict[str, Any]) -> None
         "rag_top_k": 8,
         "rag_python_bin": "",
         "rag_config_path": "",
+        "rag_home_dir": ".rag_home",
         "rag_use_local": "true",
         "output_dir": "outputs",
         "session_name": "",
@@ -2343,6 +2357,8 @@ def main() -> int:
         enabled=rag_enabled,
         python_bin=args.rag_python_bin,
         config_path=args.rag_config_path,
+        home_dir=args.rag_home_dir,
+        zotero_db_path=args.zotero_db,
         use_local=parse_bool(args.rag_use_local),
         timeout_sec=max(30, int(args.llm_timeout_sec)),
     )
@@ -2551,6 +2567,7 @@ def main() -> int:
                 "top_k": args.rag_top_k,
                 "python_bin": rag_client.python_bin,
                 "config_path": args.rag_config_path,
+                "home_dir": args.rag_home_dir,
                 "use_local": parse_bool(args.rag_use_local),
                 "last_error": rag_client.last_error,
             },

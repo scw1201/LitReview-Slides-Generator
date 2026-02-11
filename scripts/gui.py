@@ -138,6 +138,7 @@ def default_config() -> Dict[str, Any]:
         "rag_top_k": 8,
         "rag_python_bin": "",
         "rag_config_path": "",
+        "rag_home_dir": ".rag_home",
         "rag_use_local": True,
         "section_map_json": DEFAULT_SECTION_MAP,
     }
@@ -531,6 +532,10 @@ with tab_config:
             "RAG Config Path (optional)",
             value=str(cfg.get("rag_config_path", "")),
         )
+        cfg_rag_home_dir = st.text_input(
+            "RAG Home Dir (writable)",
+            value=str(cfg.get("rag_home_dir", ".rag_home")),
+        )
         cfg_rag_use_local = st.checkbox("RAG Use Local Zotero (ZOTERO_LOCAL=true)", value=bool(cfg.get("rag_use_local", True)))
 
     cfg_section_map_json = st.text_input(
@@ -593,6 +598,7 @@ with tab_config:
                 "rag_top_k": int(cfg_rag_top_k),
                 "rag_python_bin": cfg_rag_python_bin.strip(),
                 "rag_config_path": cfg_rag_config_path.strip(),
+                "rag_home_dir": cfg_rag_home_dir.strip(),
                 "rag_use_local": bool(cfg_rag_use_local),
                 "section_map_json": cfg_section_map_json,
             }
