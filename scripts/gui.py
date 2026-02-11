@@ -98,8 +98,8 @@ def default_config() -> Dict[str, Any]:
         "cluster_k": 0,
         "include_images": True,
         "output_dir": DEFAULT_OUTPUT,
-        "llm_mode": "openai_compatible",
-        "llm_model": "qwen3",
+        "llm_mode": "codex_cli",
+        "llm_model": "gpt-5-mini",
         "llm_base_url": "http://127.0.0.1:11434/v1",
         "llm_timeout_sec": 180,
         "llm_max_input_chars": 4000,
@@ -405,10 +405,11 @@ with tab_config:
         cfg_include_images = st.checkbox("Include Images", value=bool(cfg.get("include_images", True)))
         cfg_output_dir = st.text_input("Output Dir", value=str(cfg.get("output_dir", DEFAULT_OUTPUT)))
     with c2:
-        llm_modes = ["off", "openai_compatible"]
-        cur_mode = str(cfg.get("llm_mode", "openai_compatible"))
-        cfg_llm_mode = st.selectbox("LLM Mode", llm_modes, index=0 if cur_mode == "off" else 1)
-        cfg_llm_model = st.text_input("LLM Model", value=str(cfg.get("llm_model", "qwen3")))
+        llm_modes = ["off", "codex_cli", "openai_compatible"]
+        cur_mode = str(cfg.get("llm_mode", "codex_cli"))
+        cur_index = llm_modes.index(cur_mode) if cur_mode in llm_modes else 1
+        cfg_llm_mode = st.selectbox("LLM Mode", llm_modes, index=cur_index)
+        cfg_llm_model = st.text_input("LLM Model", value=str(cfg.get("llm_model", "gpt-5-mini")))
         cfg_llm_base_url = st.text_input("LLM Base URL", value=str(cfg.get("llm_base_url", "http://127.0.0.1:11434/v1")))
         cfg_llm_timeout_sec = st.number_input(
             "LLM Timeout (sec)",

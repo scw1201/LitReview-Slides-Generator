@@ -5,7 +5,9 @@ import os
 import re
 import socket
 import sqlite3
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -88,6 +90,8 @@ class LLMClient:
 
     @property
     def enabled(self) -> bool:
+        if self.mode == "codex_cli":
+            return True
         return self.mode == "openai_compatible" and bool(self.api_key)
 
     def _extract_json_obj(self, text: str) -> Optional[Dict[str, Any]]:
@@ -101,6 +105,16 @@ class LLMClient:
             return json.loads(text)
         except Exception:
             pass
+        decoder = json.JSONDecoder()
+        for i, ch in enumerate(text):
+            if ch != "{":
+                continue
+            try:
+                obj, _ = decoder.raw_decode(text[i:])
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                continue
         m = re.search(r"\{.*\}", text, re.S)
         if not m:
             return None
@@ -108,6 +122,56 @@ class LLMClient:
             return json.loads(m.group(0))
         except Exception:
             return None
+
+    def _run_codex_exec(self, prompt: str) -> Optional[str]:
+        with tempfile.TemporaryDirectory(prefix="litreview_codex_") as td:
+            out_file = Path(td) / "last_message.txt"
+            cmd = [
+                "codex",
+                "exec",
+                prompt[: self.max_input_chars],
+                "--model",
+                self.model,
+                "--skip-git-repo-check",
+                "--full-auto",
+                "--ephemeral",
+                "--output-last-message",
+                str(out_file),
+                "--color",
+                "never",
+            ]
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_sec + 30,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                self.last_error = "TimeoutError: codex_cli timeout"
+                return None
+            except Exception as e:
+                self.last_error = f"{type(e).__name__}: {e}"
+                return None
+
+            content = ""
+            if out_file.exists():
+                try:
+                    content = out_file.read_text(encoding="utf-8").strip()
+                except Exception:
+                    content = ""
+            if not content:
+                content = (proc.stdout or "").strip()
+
+            self.last_raw_content = content
+            if proc.returncode != 0:
+                err = (proc.stderr or "").strip() or f"codex_cli exit={proc.returncode}"
+                if content:
+                    self.last_error = f"codex_cli exit={proc.returncode}"
+                else:
+                    self.last_error = err
+            return content or None
 
     def _post_chat(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         data = json.dumps(payload).encode("utf-8")
@@ -128,6 +192,21 @@ class LLMClient:
             return None
         self.last_error = ""
         self.last_raw_content = ""
+        if self.mode == "codex_cli":
+            prompt = (
+                "你是严格JSON输出器。仅输出一个JSON对象，不要输出额外解释、代码块、标题。\n"
+                f"[SYSTEM]\n{system_prompt}\n\n[USER]\n{user_prompt}"
+            )
+            content = self._run_codex_exec(prompt)
+            if not content:
+                if not self.last_error:
+                    self.last_error = "empty_content"
+                return None
+            parsed = self._extract_json_obj(content)
+            if parsed is not None:
+                return parsed
+            self.last_error = "json_parse_failed"
+            return None
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt[: self.max_input_chars]},
@@ -184,6 +263,17 @@ class LLMClient:
             return None
         self.last_error = ""
         self.last_raw_content = ""
+        if self.mode == "codex_cli":
+            prompt = (
+                "请直接输出最终文本，不要附加解释。\n"
+                f"[SYSTEM]\n{system_prompt}\n\n[USER]\n{user_prompt}"
+            )
+            content = self._run_codex_exec(prompt)
+            if not content:
+                if not self.last_error:
+                    self.last_error = "empty_content"
+                return None
+            return content
         payload = {
             "model": self.model,
             "temperature": 0.2,
@@ -230,8 +320,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cluster_k", type=int, default=0, help="0 means auto clustering")
     p.add_argument("--language", choices=["zh", "en"], default="zh")
     p.add_argument("--include_images", type=str, default="true")
-    p.add_argument("--llm_mode", choices=["off", "openai_compatible"], default="off")
-    p.add_argument("--llm_model", default="gpt-4o-mini")
+    p.add_argument("--llm_mode", choices=["off", "openai_compatible", "codex_cli"], default="codex_cli")
+    p.add_argument("--llm_model", default="gpt-5-mini")
     p.add_argument("--llm_base_url", default="https://api.openai.com/v1")
     p.add_argument("--llm_api_key_env", default="OPENAI_API_KEY")
     p.add_argument("--llm_timeout_sec", type=int, default=180)
@@ -330,8 +420,8 @@ def apply_config_defaults(args: argparse.Namespace, cfg: Dict[str, Any]) -> None
         "cluster_k": 0,
         "language": "zh",
         "include_images": "true",
-        "llm_mode": "off",
-        "llm_model": "gpt-4o-mini",
+        "llm_mode": "codex_cli",
+        "llm_model": "gpt-5-mini",
         "llm_base_url": "https://api.openai.com/v1",
         "llm_timeout_sec": 180,
         "llm_max_input_chars": 12000,
@@ -1918,7 +2008,7 @@ def main() -> int:
         max_input_chars=args.llm_max_input_chars,
         max_tokens=args.llm_max_tokens,
     )
-    if args.llm_mode != "off" and not llm_client.enabled:
+    if args.llm_mode == "openai_compatible" and not llm_client.enabled:
         print(
             f"[warn] llm mode requested but api key env '{args.llm_api_key_env}' is empty; fallback to rule-based mode",
             file=sys.stderr,

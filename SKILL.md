@@ -23,43 +23,43 @@ Use GUI tabs in this order:
 Step 1, analyze each paper:
 
 ```bash
-OPENAI_API_KEY=ollama python3 /Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/build_litreview.py \
+python3 /Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/build_litreview.py \
   --mode analyze \
   --collection "museum-digital-human" \
   --language zh \
-  --llm_mode off \
+  --llm_mode codex_cli \
+  --llm_model gpt-5-mini \
   --output_dir /Users/la/Desktop/research_skills/
 ```
 
 Step 2, global synthesis:
 
 ```bash
-OPENAI_API_KEY=ollama python3 /Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/build_litreview.py \
+python3 /Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/build_litreview.py \
   --mode global \
   --collection "museum-digital-human" \
   --cluster_k 4 \
+  --llm_mode codex_cli \
+  --llm_model gpt-5-mini \
   --output_dir /Users/la/Desktop/research_skills/
 ```
 
 Step 3, render markdown and ppt:
 
 ```bash
-OPENAI_API_KEY=ollama python3 /Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/build_litreview.py \
+python3 /Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/build_litreview.py \
   --mode render \
   --collection "museum-digital-human" \
   --language zh \
   --include_images true \
+  --llm_mode codex_cli \
+  --llm_model gpt-5-mini \
   --output_dir /Users/la/Desktop/research_skills/
 ```
 
 ## Codex-First Quality Mode
 
-When local model quality is unstable, prefer this flow:
-1. Run Step 1 with `--llm_mode off` to produce base `review_<collection>.analyze.json`.
-2. Edit paper fields in GUI `Edit Analysis` (task, method, contributions, limitations, keywords).
-3. Run Step 2 + Step 3.
-
-This keeps extraction deterministic and lets Codex improve final wording before rendering.
+Use `--llm_mode codex_cli` in all stages so content generation is done by Codex.
 
 ## Key Files
 

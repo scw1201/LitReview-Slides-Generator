@@ -38,13 +38,12 @@ streamlit run /Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/g
 3. Or run CLI directly:
 
 ```bash
-OPENAI_API_KEY=ollama python3 /Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/build_litreview.py \
+python3 /Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/build_litreview.py \
   --collection "museum-digital-human" \
   --language zh \
   --include_images true \
-  --llm_mode openai_compatible \
-  --llm_model qwen3 \
-  --llm_base_url http://127.0.0.1:11434/v1 \
+  --llm_mode codex_cli \
+  --llm_model gpt-5-mini \
   --llm_timeout_sec 180 \
   --llm_max_input_chars 4000 \
   --llm_max_tokens 512 \
@@ -52,6 +51,8 @@ OPENAI_API_KEY=ollama python3 /Users/la/Desktop/check_code/zotero-pdf-to-litrevi
   --output_dir /Users/la/Desktop/research_skills/ \
   --verbose
 ```
+
+If you still want local/Ollama models, set `--llm_mode openai_compatible` and provide `--llm_base_url`.
 
 ## Notes
 
