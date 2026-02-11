@@ -1,0 +1,4 @@
+interface:
+  display_name: "Zotero LitReview PPT"
+  short_description: "Generate lit-review PPT from local Zotero PDFs"
+  default_prompt: "Use $zotero-pdf-to-litreview-ppt to create a three-part literature review deck from a local Zotero collection without any network downloads."

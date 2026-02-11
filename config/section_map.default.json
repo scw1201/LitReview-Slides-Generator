@@ -1,0 +1,40 @@
+{
+  "abstract": [
+    "^abstract$"
+  ],
+  "intro": [
+    "\\bintroduction\\b",
+    "\\bbackground\\b",
+    "\\bmotivation\\b"
+  ],
+  "method": [
+    "\\bmaterials?\\s+and\\s+methods?\\b",
+    "\\bmethods?\\b",
+    "\\bmethodology\\b",
+    "\\bapproach\\b",
+    "\\bframework\\b",
+    "\\bmodel\\b",
+    "\\bimplementation\\b"
+  ],
+  "results": [
+    "\\bexperiment",
+    "\\bresults?\\b",
+    "\\bevaluation\\b",
+    "\\buser study\\b",
+    "\\bablation\\b"
+  ],
+  "discussion": [
+    "\\bdiscussion\\b"
+  ],
+  "conclusion": [
+    "\\bconclusion\\b",
+    "\\bconcluding\\b",
+    "\\bconclusion\\s+and\\s+future\\s+work\\b"
+  ],
+  "limitations": [
+    "\\blimitation",
+    "\\bfuture work\\b",
+    "\\bfuture directions?\\b",
+    "\\bthreats to validity\\b"
+  ]
+}
