@@ -4,13 +4,14 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from typing import Dict, Any
 
-import pandas as pd
 import streamlit as st
 
 
 SCRIPT = "/Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/scripts/build_litreview.py"
 DEFAULT_OUTPUT = "/Users/la/Desktop/research_skills/"
+DEFAULT_CONFIG = "/Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/config/pipeline.json"
 
 
 def status_path(collection: str, outdir: str) -> Path:
@@ -25,7 +26,15 @@ def paper_status_path(collection: str, outdir: str) -> Path:
     return Path(outdir) / f"review_{collection}.paper_status.jsonl"
 
 
-def report_path(collection: str, outdir: str) -> Path:
+def analyze_json_path(collection: str, outdir: str) -> Path:
+    return Path(outdir) / f"review_{collection}.analyze.json"
+
+
+def global_json_path(collection: str, outdir: str) -> Path:
+    return Path(outdir) / f"review_{collection}.global.json"
+
+
+def report_json_path(collection: str, outdir: str) -> Path:
     return Path(outdir) / f"review_{collection}.json"
 
 
@@ -45,7 +54,6 @@ def read_jsonl(path: Path):
 
 
 def run_cmd(args, env):
-    # Do not pipe stdout/stderr without consuming; it can block long-running jobs.
     return subprocess.Popen(
         args,
         stdout=subprocess.DEVNULL,
@@ -55,17 +63,76 @@ def run_cmd(args, env):
     )
 
 
-def clear_state_files(collection: str, outdir: str) -> None:
+def detect_build_processes():
+    try:
+        out = subprocess.check_output(["pgrep", "-fl", "build_litreview.py"], text=True)
+        rows = []
+        for line in out.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(line)
+        return rows
+    except Exception:
+        return []
+
+
+def clear_runtime_state(collection: str, outdir: str) -> None:
     targets = [
-        Path(outdir) / f"review_{collection}.status.json",
-        Path(outdir) / f"review_{collection}.run.log",
-        Path(outdir) / f"review_{collection}.paper_status.jsonl",
+        status_path(collection, outdir),
+        log_path(collection, outdir),
+        paper_status_path(collection, outdir),
     ]
     for p in targets:
         try:
             p.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+def default_config() -> Dict[str, Any]:
+    return {
+        "collection": "museum-digital-human",
+        "language": "zh",
+        "max_papers": 20,
+        "cluster_k": 0,
+        "include_images": True,
+        "output_dir": DEFAULT_OUTPUT,
+        "llm_mode": "openai_compatible",
+        "llm_model": "qwen3",
+        "llm_base_url": "http://127.0.0.1:11434/v1",
+        "llm_timeout_sec": 180,
+        "llm_max_input_chars": 4000,
+        "llm_max_tokens": 512,
+        "section_map_json": "/Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/config/section_map.default.json",
+    }
+
+
+def load_or_init_config(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        cfg = default_config()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        return cfg
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return default_config()
+        merged = default_config()
+        merged.update(data)
+        return merged
+    except Exception:
+        return default_config()
+
+
+def is_pid_running(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
 
 
 def items_to_text(items):
@@ -92,211 +159,409 @@ def text_to_items(text):
     return lines
 
 
-st.set_page_config(page_title="Zotero LitReview PPT", layout="wide")
-st.title("Zotero LitReview PPT Generator")
+def render_paper_timeline(rows, limit=30):
+    if not rows:
+        st.info("No per-paper status yet for current run.")
+        return
+    # Show user-meaningful outcomes only.
+    filtered = [r for r in rows if r.get("status") in {"parsed", "failed"}]
+    if not filtered:
+        st.info("No parsed/failed entries yet.")
+        return
+    recent = filtered[-limit:]
+    for r in reversed(recent):
+        idx = r.get("index", "-")
+        total = r.get("total", "-")
+        title = str(r.get("title", "unknown"))
+        status = str(r.get("status", "unknown"))
+        ts = str(r.get("timestamp", ""))
+        badge = "✅" if status == "parsed" else ("❌" if status == "failed" else "⏳")
+        with st.expander(f"{badge} [{idx}/{total}] {title}  ({status}, {ts})", expanded=False):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.caption(f"Year: {r.get('year', '-')}")
+            c2.caption(f"Venue: {r.get('venue', '-')}")
+            c3.caption(f"LLM Error: {r.get('llm_error', '-') or '-'}")
+            c4.caption(f"Has Image: {r.get('has_image', '-')}")
+            if r.get("task_definition"):
+                st.markdown("**Task**")
+                st.write("\n".join(r.get("task_definition", [])))
+            if r.get("core_method"):
+                st.markdown("**Method**")
+                st.write("\n".join(f"- {x}" for x in r.get("core_method", [])))
+            if r.get("main_contributions"):
+                st.markdown("**Contributions**")
+                st.write("\n".join(f"- {x}" for x in r.get("main_contributions", [])))
+            if r.get("limitations"):
+                st.markdown("**Limitations**")
+                st.write("\n".join(f"- {x}" for x in r.get("limitations", [])))
 
-col1, col2 = st.columns(2)
-with col1:
-    collection = st.text_input("Collection", value="museum-digital-human")
-    language = st.selectbox("Language", ["zh", "en"], index=0)
-    max_papers = st.number_input("Max Papers", min_value=1, max_value=200, value=20, step=1)
-    include_images = st.checkbox("Include Images", value=True)
-with col2:
-    llm_enabled = st.checkbox("Enable Local LLM", value=True)
-    llm_model = st.text_input("LLM Model", value="qwen3-vl:4b")
-    llm_base_url = st.text_input("LLM Base URL", value="http://127.0.0.1:11434/v1")
-    llm_timeout_sec = st.number_input("LLM Timeout (sec)", min_value=30, max_value=900, value=180, step=30)
-    llm_max_input_chars = st.number_input("LLM Max Input Chars", min_value=4000, max_value=40000, value=12000, step=1000)
-    output_dir = st.text_input("Output Dir", value=DEFAULT_OUTPUT)
 
-run_key = "run_pid"
-if run_key not in st.session_state:
-    st.session_state[run_key] = None
+st.set_page_config(page_title="LitReview Slides Generator", layout="wide")
+st.title("LitReview Slides Generator")
 
-tab_pipeline, tab_edit = st.tabs(["Pipeline", "Edit Analysis JSON"])
+if "config_path" not in st.session_state:
+    st.session_state["config_path"] = DEFAULT_CONFIG
+if "cfg" not in st.session_state:
+    st.session_state["cfg"] = load_or_init_config(Path(st.session_state["config_path"]))
 
-with tab_pipeline:
-    if st.button("Run"):
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        # keep GUI status tied to one active process only
-        old_pid = st.session_state.get(run_key)
-        if old_pid:
+config_path = st.session_state["config_path"]
+cfg = st.session_state["cfg"]
+collection = str(cfg.get("collection", "museum-digital-human"))
+output_dir = str(cfg.get("output_dir", DEFAULT_OUTPUT))
+
+if "run_pids" not in st.session_state:
+    st.session_state["run_pids"] = {"analyze": None, "global": None, "render": None, "all": None}
+if "auto_refresh" not in st.session_state:
+    st.session_state["auto_refresh"] = False
+if "refresh_sec" not in st.session_state:
+    st.session_state["refresh_sec"] = 10
+# one-time migration for old sessions that defaulted to auto refresh ON
+if "auto_refresh_migrated" not in st.session_state:
+    st.session_state["auto_refresh"] = False
+    st.session_state["auto_refresh_migrated"] = True
+
+
+def launch_mode(mode: str):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    # stop all old jobs first
+    for m, pid in st.session_state["run_pids"].items():
+        if is_pid_running(pid):
             try:
-                os.kill(old_pid, 15)
+                os.kill(pid, 15)
             except Exception:
                 pass
-        clear_state_files(collection, output_dir)
-        args = [
-            "python3",
-            SCRIPT,
-            "--collection",
-            collection,
-            "--language",
-            language,
-            "--max_papers",
-            str(max_papers),
-            "--include_images",
-            "true" if include_images else "false",
-            "--output_dir",
-            output_dir,
-        ]
-        env = os.environ.copy()
-        if llm_enabled:
-            args.extend(
-                [
-                    "--llm_mode",
-                    "openai_compatible",
-                    "--llm_model",
-                    llm_model,
-                    "--llm_base_url",
-                    llm_base_url,
-                    "--llm_timeout_sec",
-                    str(llm_timeout_sec),
-                    "--llm_max_input_chars",
-                    str(llm_max_input_chars),
-                ]
-            )
-            env["OPENAI_API_KEY"] = "ollama"
-        proc = run_cmd(args, env)
-        st.session_state[run_key] = proc.pid
-        st.success(f"Started PID={proc.pid}")
+            st.session_state["run_pids"][m] = None
+    if mode == "analyze":
+        clear_runtime_state(collection, output_dir)
 
-    st.caption("Click Refresh to reload status/log.")
-    if st.button("Refresh"):
-        pass
+    args = [
+        "python3",
+        SCRIPT,
+        "--mode",
+        mode,
+        "--collection",
+        collection,
+        "--config_json",
+        config_path,
+    ]
+    env = os.environ.copy()
+    if str(cfg.get("llm_mode", "off")) == "openai_compatible":
+        env["OPENAI_API_KEY"] = "ollama"
+    proc = run_cmd(args, env)
+    st.session_state["run_pids"][mode] = proc.pid
+    st.success(f"Started {mode} PID={proc.pid}")
 
-    auto_refresh = st.checkbox("Auto Refresh", value=True)
-    refresh_sec = st.selectbox("Refresh Interval (sec)", [2, 3, 5, 10], index=3)
 
-    pid = st.session_state.get(run_key)
-    is_running = False
-    if pid:
-        try:
-            os.kill(pid, 0)
-            is_running = True
-            st.info(f"Runner PID={pid} (running)")
-        except Exception:
-            st.warning(f"Runner PID={pid} (not running)")
+tab_pipeline, tab_config, tab_edit = st.tabs(["Pipeline", "Config", "Edit Analysis"])
+
+with tab_pipeline:
+    st.markdown("### Step 1 - Analyze Papers")
+    st.caption("读取并分析每篇文献，输出 analyze.json")
+    if st.button("Start Step 1", key="start_step1"):
+        launch_mode("analyze")
+
+    st.markdown("### Step 2 - Global Synthesis")
+    st.caption("基于 analyze.json 做聚类方向分析与全局总结，输出 global.json")
+    if st.button("Start Step 2", key="start_step2"):
+        launch_mode("global")
+
+    st.markdown("### Step 3 - Render PPT")
+    st.caption("基于 analyze.json + global.json 生成 markdown/ppt/json")
+    if st.button("Start Step 3", key="start_step3"):
+        launch_mode("render")
+
+    st.markdown("### Optional - Run Full Pipeline")
+    if st.button("Start All Steps", key="start_all_steps"):
+        launch_mode("all")
+
+    auto_refresh = bool(st.session_state["auto_refresh"])
+    refresh_sec = int(st.session_state["refresh_sec"])
+
+    running = {m: p for m, p in st.session_state["run_pids"].items() if is_pid_running(p)}
+    external = detect_build_processes()
+    active = bool(running or external)
+    if running:
+        st.info("Running: " + ", ".join([f"{m}(PID={p})" for m, p in running.items()]))
+    elif external:
+        st.warning("Detected running build process outside current GUI session.")
+        st.code("\n".join(external), language="text")
+    else:
+        st.caption("No active process.")
 
     sp = status_path(collection, output_dir)
     lp = log_path(collection, output_dir)
     pp = paper_status_path(collection, output_dir)
 
-    st.subheader("Status")
-    if sp.exists():
-        try:
-            data = json.loads(sp.read_text(encoding="utf-8"))
-            st.progress(int(data.get("progress_pct", 0)))
-            st.json(data)
-        except Exception as e:
-            st.error(f"status parse failed: {e}")
+    st.subheader("Current Run Status")
+    if not active:
+        st.info("Idle. No active pipeline process.")
     else:
-        st.info("No status file yet.")
+        status_data = {}
+        if sp.exists():
+            try:
+                status_data = json.loads(sp.read_text(encoding="utf-8"))
+            except Exception:
+                status_data = {}
+        progress_pct = int(status_data.get("progress_pct", 0)) if status_data else 0
+        st.progress(progress_pct)
+        stage = str(status_data.get("stage", "-"))
+        msg = str(status_data.get("message", "-"))
 
-    st.subheader("Log")
-    log_window = st.slider("Log Window (last N lines)", min_value=10, max_value=1000, value=10, step=10)
-    if lp.exists():
-        log_lines = lp.read_text(encoding="utf-8").splitlines()
-        tail_lines = log_lines[-log_window:]
-        st.code("\n".join(tail_lines), language="text")
-        st.caption(f"Showing {len(tail_lines)} / {len(log_lines)} log lines")
-    else:
-        st.info("No log file yet.")
-
-    st.subheader("Per-Paper Progress & Results")
-    paper_rows = read_jsonl(pp)
-    if paper_rows:
-        df = pd.DataFrame(paper_rows)
-        cols = [c for c in ["timestamp", "index", "total", "status", "title", "year", "venue", "authors_n", "has_image", "llm_task_used", "llm_method_used", "llm_contrib_used", "llm_limits_used", "llm_error", "reason"] if c in df.columns]
-        st.dataframe(df[cols], width="stretch", height=280)
-
+        paper_rows = read_jsonl(pp)
         parsed_rows = [r for r in paper_rows if r.get("status") == "parsed"]
-        if parsed_rows:
-            options = {f"[{r.get('index')}/{r.get('total')}] {r.get('title','unknown')}": r for r in parsed_rows}
-            selected = st.selectbox("Inspect one paper", list(options.keys()))
-            r = options[selected]
-            st.markdown("**Task**")
-            st.write("\n".join(r.get("task_definition", [])) or "-")
-            st.markdown("**Core Method**")
-            st.write("\n".join(f"- {x}" for x in r.get("core_method", [])) or "-")
-            st.markdown("**Contributions**")
-            st.write("\n".join(f"- {x}" for x in r.get("main_contributions", [])) or "-")
-            st.markdown("**Limitations**")
-            st.write("\n".join(f"- {x}" for x in r.get("limitations", [])) or "-")
-            if r.get("llm_error"):
-                st.markdown("**LLM Error**")
-                st.code(str(r.get("llm_error")), language="text")
-            if r.get("llm_error_debug"):
-                st.markdown("**LLM Debug Error**")
-                st.code(str(r.get("llm_error_debug")), language="text")
-            if r.get("llm_raw_preview"):
-                st.markdown("**LLM Raw Preview**")
-                st.code(str(r.get("llm_raw_preview")), language="text")
-    else:
-        st.info("No per-paper status yet.")
+        failed_rows = [r for r in paper_rows if r.get("status") == "failed"]
+        current_row = paper_rows[-1] if paper_rows else {}
+        cur_title = str(current_row.get("title", "-"))
+        cur_index = current_row.get("index", "-")
+        cur_total = current_row.get("total", "-")
 
-    if auto_refresh and is_running:
-        st.caption(f"Auto refreshing every {refresh_sec}s while runner is active")
-        st.markdown(
-            f"<meta http-equiv='refresh' content='{refresh_sec}'>",
-            unsafe_allow_html=True,
-        )
+        def stage_to_step(stage_name: str) -> str:
+            s = (stage_name or "").strip().lower()
+            if s in {"init", "manifest", "paper_analysis"}:
+                return "1"
+            if s in {"synthesis", "global"}:
+                return "2"
+            if s in {"render"}:
+                return "3"
+            if s == "done":
+                if report_json_path(collection, output_dir).exists():
+                    return "3"
+                if global_json_path(collection, output_dir).exists():
+                    return "2"
+                return "1"
+            return "-"
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+        stage_label = stage_to_step(stage)
+        if stage and stage != "-":
+            stage_label = f"{stage_to_step(stage)} ({stage})"
+        m1.metric("Stage", stage_label)
+        m2.metric("Progress", f"{progress_pct}%")
+        m3.metric("Parsed", str(len(parsed_rows)))
+        m4.metric("Failed", str(len(failed_rows)))
+        m5.metric("Current", f"{cur_index}/{cur_total}")
+        st.caption(f"Message: {msg}")
+        st.caption(f"Paper: {cur_title}")
+
+        render_paper_timeline(paper_rows, limit=30)
+
+        log_window = st.slider("Recent Log Lines", min_value=10, max_value=1000, value=80, step=10)
+        if lp.exists():
+            log_lines = lp.read_text(encoding="utf-8").splitlines()
+            tail_lines = log_lines[-log_window:]
+            st.code("\n".join(tail_lines), language="text")
+        else:
+            st.info("No log file yet.")
 
     st.subheader("Outputs")
-    for suffix in ["pptx", "md", "json", "manifest.json", "status.json", "run.log"]:
-        p = Path(output_dir) / f"review_{collection}.{suffix}"
+    for p in [
+        analyze_json_path(collection, output_dir),
+        global_json_path(collection, output_dir),
+        report_json_path(collection, output_dir),
+        Path(output_dir) / f"review_{collection}.md",
+        Path(output_dir) / f"review_{collection}.pptx",
+    ]:
         if p.exists():
             st.write(str(p))
 
+    if auto_refresh and active:
+        st.caption(f"Auto refreshing every {refresh_sec}s while process is active")
+        st.markdown(f"<meta http-equiv='refresh' content='{refresh_sec}'>", unsafe_allow_html=True)
+
+with tab_config:
+    st.subheader("Pipeline Config")
+    st.caption("Maintain pipeline config via form fields. No raw JSON editing needed.")
+    cfg_file_col1, cfg_file_col2 = st.columns([4, 1])
+    with cfg_file_col1:
+        cfg_path_input = st.text_input("Config File", value=st.session_state["config_path"])
+    with cfg_file_col2:
+        if st.button("Load Config"):
+            try:
+                st.session_state["config_path"] = cfg_path_input
+                st.session_state["cfg"] = load_or_init_config(Path(cfg_path_input))
+                st.success("Config loaded.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Load failed: {e}")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        cfg_collection = st.text_input("Collection", value=str(cfg.get("collection", "museum-digital-human")))
+        cfg_language = st.selectbox("Language", ["zh", "en"], index=0 if str(cfg.get("language", "zh")) == "zh" else 1)
+        cfg_max_papers = st.number_input(
+            "Max Papers",
+            min_value=1,
+            max_value=200,
+            value=int(cfg.get("max_papers", 20)),
+            step=1,
+        )
+        cfg_cluster_k = st.number_input(
+            "Cluster K (0 = auto)",
+            min_value=0,
+            max_value=20,
+            value=int(cfg.get("cluster_k", 0)),
+            step=1,
+        )
+        cfg_include_images = st.checkbox("Include Images", value=bool(cfg.get("include_images", True)))
+        cfg_output_dir = st.text_input("Output Dir", value=str(cfg.get("output_dir", DEFAULT_OUTPUT)))
+    with c2:
+        llm_modes = ["off", "openai_compatible"]
+        cur_mode = str(cfg.get("llm_mode", "openai_compatible"))
+        cfg_llm_mode = st.selectbox("LLM Mode", llm_modes, index=0 if cur_mode == "off" else 1)
+        cfg_llm_model = st.text_input("LLM Model", value=str(cfg.get("llm_model", "qwen3")))
+        cfg_llm_base_url = st.text_input("LLM Base URL", value=str(cfg.get("llm_base_url", "http://127.0.0.1:11434/v1")))
+        cfg_llm_timeout_sec = st.number_input(
+            "LLM Timeout (sec)",
+            min_value=30,
+            max_value=900,
+            value=int(cfg.get("llm_timeout_sec", 180)),
+            step=30,
+        )
+        cfg_llm_max_input_chars = st.number_input(
+            "LLM Max Input Chars",
+            min_value=1000,
+            max_value=50000,
+            value=int(cfg.get("llm_max_input_chars", 4000)),
+            step=500,
+        )
+        cfg_llm_max_tokens = st.number_input(
+            "LLM Max Tokens",
+            min_value=32,
+            max_value=4000,
+            value=int(cfg.get("llm_max_tokens", 512)),
+            step=32,
+        )
+
+    cfg_section_map_json = st.text_input(
+        "Section Map JSON",
+        value=str(
+            cfg.get(
+                "section_map_json",
+                "/Users/la/Desktop/check_code/zotero-pdf-to-litreview-ppt/config/section_map.default.json",
+            )
+        ),
+    )
+    save_backup = st.checkbox("Create backup before save", value=True)
+    st.markdown("#### Runtime Refresh")
+    st.checkbox(
+        "Auto Refresh (Pipeline)",
+        key="auto_refresh",
+    )
+    refresh_choices = [2, 3, 5, 10]
+    cur_refresh = int(st.session_state.get("refresh_sec", 10))
+    refresh_idx = refresh_choices.index(cur_refresh) if cur_refresh in refresh_choices else 3
+    st.selectbox(
+        "Refresh Interval (sec)",
+        refresh_choices,
+        index=refresh_idx,
+        key="refresh_sec",
+    )
+    st.markdown("#### Process Control")
+    if st.button("Stop All Running build_litreview.py"):
+        try:
+            subprocess.run(["pkill", "-f", "build_litreview.py"], check=False)
+            for k in list(st.session_state["run_pids"].keys()):
+                st.session_state["run_pids"][k] = None
+            clear_runtime_state(collection, output_dir)
+            st.success("Stop signal sent.")
+        except Exception as e:
+            st.error(f"Stop failed: {e}")
+    if st.button("Save Config"):
+        try:
+            new_cfg = {
+                "collection": cfg_collection,
+                "language": cfg_language,
+                "max_papers": int(cfg_max_papers),
+                "cluster_k": int(cfg_cluster_k),
+                "include_images": bool(cfg_include_images),
+                "output_dir": cfg_output_dir,
+                "llm_mode": cfg_llm_mode,
+                "llm_model": cfg_llm_model,
+                "llm_base_url": cfg_llm_base_url,
+                "llm_timeout_sec": int(cfg_llm_timeout_sec),
+                "llm_max_input_chars": int(cfg_llm_max_input_chars),
+                "llm_max_tokens": int(cfg_llm_max_tokens),
+                "section_map_json": cfg_section_map_json,
+            }
+            st.session_state["config_path"] = cfg_path_input
+            p = Path(cfg_path_input)
+            if save_backup and p.exists():
+                bak = p.with_suffix(p.suffix + f".{time.strftime('%Y%m%d-%H%M%S')}.bak")
+                bak.write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+                st.caption(f"Backup: {bak}")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(new_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+            st.session_state["cfg"] = new_cfg
+            st.success("Config saved and applied.")
+        except Exception as e:
+            st.error(f"Save failed: {e}")
+
 with tab_edit:
     st.subheader("Edit Per-Paper Analysis Data")
-    st.caption("Edit fields in review_<collection>.json and save for PPT rendering.")
-    rp = report_path(collection, output_dir)
+    rp = analyze_json_path(collection, output_dir)
     st.code(str(rp), language="text")
+    running_now = {m: p for m, p in st.session_state["run_pids"].items() if is_pid_running(p)}
+    external_now = detect_build_processes()
+    active_now = bool(running_now or external_now)
+    editable = (not active_now) and rp.exists()
+
     if not rp.exists():
-        st.info("Analysis JSON not found yet. Run pipeline first.")
+        st.warning("Analyze JSON not found yet. Showing preview from paper_status.jsonl if available.")
+        pp = paper_status_path(collection, output_dir)
+        rows = read_jsonl(pp)
+        parsed_rows = [r for r in rows if r.get("status") == "parsed"]
+        if parsed_rows:
+            st.caption("Preview only (not editable yet)")
+            render_paper_timeline(parsed_rows, limit=20)
+        else:
+            st.info("No parsed paper preview yet.")
     else:
+        if active_now:
+            st.info("Preview mode: pipeline is running, editing is locked to avoid dirty read/write.")
+        else:
+            st.success("Edit mode: pipeline idle, safe to modify analyze.json.")
         try:
             report = json.loads(rp.read_text(encoding="utf-8"))
         except Exception as e:
-            st.error(f"Failed to read report JSON: {e}")
+            st.error(f"Failed to read analyze JSON: {e}")
             report = None
 
         if isinstance(report, dict):
             papers = report.get("papers", [])
             if not papers:
-                st.info("No papers in report JSON.")
+                st.info("No papers in analyze JSON.")
             else:
-                indices = list(range(len(papers)))
+                idxs = list(range(len(papers)))
                 chosen = st.selectbox(
                     "Choose Paper",
-                    indices,
+                    idxs,
                     format_func=lambda i: f"[{i + 1}/{len(papers)}] {papers[i].get('title', 'unknown')}",
                 )
                 p = papers[chosen]
 
                 col_a, col_b = st.columns(2)
                 with col_a:
-                    title = st.text_input("Title", value=str(p.get("title", "")))
-                    authors_text = st.text_input("Authors (comma-separated)", value=", ".join(p.get("authors", [])))
-                    venue = st.text_input("Venue", value=str(p.get("venue", "")))
-                    year = st.text_input("Year", value=str(p.get("year", "")))
+                    title = st.text_input("Title", value=str(p.get("title", "")), disabled=not editable)
+                    authors_text = st.text_input("Authors (comma-separated)", value=", ".join(p.get("authors", [])), disabled=not editable)
+                    venue = st.text_input("Venue", value=str(p.get("venue", "")), disabled=not editable)
+                    year = st.text_input("Year", value=str(p.get("year", "")), disabled=not editable)
                 with col_b:
-                    institution = st.text_input("Institution", value=str(p.get("institution", "")))
-                    doi = st.text_input("DOI", value=str(p.get("doi", "")))
+                    institution = st.text_input("Institution", value=str(p.get("institution", "")), disabled=not editable)
+                    doi = st.text_input("DOI", value=str(p.get("doi", "")), disabled=not editable)
                     open_src = st.text_input(
                         "Open Source (yes/no/unknown)",
                         value=str((p.get("open_source_status", {}) or {}).get("value", "unknown")),
+                        disabled=not editable,
                     )
-                    keywords = st.text_area("Keywords (one per line)", value="\n".join(p.get("keywords", [])), height=110)
+                    keywords = st.text_area("Keywords (one per line)", value="\n".join(p.get("keywords", [])), height=110, disabled=not editable)
 
-                task_text = st.text_area("Task Definition (one line per bullet)", value=items_to_text(p.get("task_definition", [])), height=90)
-                method_text = st.text_area("Core Method (one line per bullet)", value=items_to_text(p.get("core_method", [])), height=150)
-                contrib_text = st.text_area("Main Contributions (one line per bullet)", value=items_to_text(p.get("main_contributions", [])), height=170)
-                limit_text = st.text_area("Limitations (one line per bullet)", value=items_to_text(p.get("limitations", [])), height=150)
+                task_text = st.text_area("Task Definition (one line per bullet)", value=items_to_text(p.get("task_definition", [])), height=90, disabled=not editable)
+                method_text = st.text_area("Core Method (one line per bullet)", value=items_to_text(p.get("core_method", [])), height=150, disabled=not editable)
+                contrib_text = st.text_area("Main Contributions (one line per bullet)", value=items_to_text(p.get("main_contributions", [])), height=170, disabled=not editable)
+                limit_text = st.text_area("Limitations (one line per bullet)", value=items_to_text(p.get("limitations", [])), height=150, disabled=not editable)
 
-                save_backup = st.checkbox("Create backup before save", value=True)
-                if st.button("Save Paper Edits"):
+                save_backup = st.checkbox("Create backup before save", value=True, key="paper_backup")
+                if st.button("Save Paper Edits", disabled=not editable):
                     p["title"] = title.strip()
                     p["authors"] = [x.strip() for x in authors_text.split(",") if x.strip()]
                     p["venue"] = venue.strip()
@@ -311,9 +576,9 @@ with tab_edit:
                     p["open_source_status"] = {"value": (open_src.strip() or "unknown"), "evidence": []}
 
                     report["papers"][chosen] = p
-                    if save_backup:
+                    if save_backup and rp.exists():
                         bak = rp.with_suffix(rp.suffix + f".{time.strftime('%Y%m%d-%H%M%S')}.bak")
-                        bak.write_text(json.dumps(json.loads(rp.read_text(encoding="utf-8")), ensure_ascii=False, indent=2), encoding="utf-8")
+                        bak.write_text(rp.read_text(encoding="utf-8"), encoding="utf-8")
                         st.caption(f"Backup: {bak}")
                     rp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-                    st.success("Saved changes to report JSON.")
+                    st.success("Saved changes to analyze JSON.")

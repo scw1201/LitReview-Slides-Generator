@@ -224,8 +224,10 @@ def parse_args() -> argparse.Namespace:
         description="Generate literature-review PPT/MD/JSON from local Zotero PDF manifest."
     )
     p.add_argument("--collection", required=True, help="Collection name or key")
+    p.add_argument("--mode", choices=["analyze", "global", "render", "all"], default="all")
     p.add_argument("--manifest", help="Optional path to Zotero item manifest JSON")
     p.add_argument("--max_papers", type=int, default=20)
+    p.add_argument("--cluster_k", type=int, default=0, help="0 means auto clustering")
     p.add_argument("--language", choices=["zh", "en"], default="zh")
     p.add_argument("--include_images", type=str, default="true")
     p.add_argument("--llm_mode", choices=["off", "openai_compatible"], default="off")
@@ -238,6 +240,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--zotero_db", default=str(Path.home() / "Zotero" / "zotero.sqlite"))
     p.add_argument("--zotero_storage_dir", default=str(Path.home() / "Zotero" / "storage"))
     p.add_argument("--output_dir", default="/Users/la/Desktop/research_skills/")
+    p.add_argument("--analyze_json", default="", help="Path to per-paper analysis JSON")
+    p.add_argument("--global_json", default="", help="Path to global synthesis JSON")
+    p.add_argument("--config_json", default="", help="Optional config JSON; CLI args override missing keys only")
     p.add_argument("--status_file", default="")
     p.add_argument("--log_file", default="")
     p.add_argument("--paper_status_file", default="")
@@ -306,6 +311,39 @@ def append_jsonl(path: Optional[Path], obj: Dict[str, Any]) -> None:
         pass
 
 
+def load_config_json(path: Optional[Path]) -> Dict[str, Any]:
+    if path is None or not str(path).strip():
+        return {}
+    if not path.exists():
+        raise ValueError(f"config json not found: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("config json must be an object")
+    return data
+
+
+def apply_config_defaults(args: argparse.Namespace, cfg: Dict[str, Any]) -> None:
+    # Fill only when CLI value equals parser default.
+    defaults = {
+        "mode": "all",
+        "max_papers": 20,
+        "cluster_k": 0,
+        "language": "zh",
+        "include_images": "true",
+        "llm_mode": "off",
+        "llm_model": "gpt-4o-mini",
+        "llm_base_url": "https://api.openai.com/v1",
+        "llm_timeout_sec": 180,
+        "llm_max_input_chars": 12000,
+        "llm_max_tokens": 180,
+        "output_dir": "/Users/la/Desktop/research_skills/",
+        "section_map_json": "",
+    }
+    for k, default_v in defaults.items():
+        if k in cfg and hasattr(args, k) and getattr(args, k) == default_v:
+            setattr(args, k, cfg[k])
+
+
 def validate_args(args: argparse.Namespace) -> None:
     if args.max_papers < 1 or args.max_papers > 200:
         raise ValueError("--max_papers must be in [1, 200]")
@@ -319,6 +357,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--llm_max_input_chars must be >= 1000")
     if args.llm_max_tokens < 32:
         raise ValueError("--llm_max_tokens must be >= 32")
+    if args.cluster_k < 0:
+        raise ValueError("--cluster_k must be >= 0")
     if args.section_map_json:
         p = Path(args.section_map_json)
         if not p.exists():
@@ -561,6 +601,50 @@ def split_sentences(text: str) -> List[str]:
         return []
     parts = re.split(r"(?<=[。！？!?\.])\s+", text)
     return [p.strip() for p in parts if p.strip()]
+
+
+def extract_keywords_rule(intro_text: str, language: str, top_n: int = 6) -> List[str]:
+    text = re.sub(r"\s+", " ", intro_text or "").strip()
+    if not text:
+        return []
+    if language == "zh":
+        candidates = re.findall(r"[\u4e00-\u9fff]{2,8}", text)
+        stop = {"我们", "本文", "研究", "方法", "结果", "系统", "进行", "通过", "一种", "提出"}
+    else:
+        candidates = [x.lower() for x in re.findall(r"[A-Za-z][A-Za-z\-]{2,}", text)]
+        stop = {
+            "this",
+            "paper",
+            "study",
+            "method",
+            "results",
+            "approach",
+            "using",
+            "based",
+            "propose",
+        }
+    cnt = Counter(x for x in candidates if x not in stop)
+    return [k for k, _ in cnt.most_common(top_n)]
+
+
+def extract_keywords_from_intro(
+    intro_text: str, language: str, llm_client: Optional["LLMClient"], title: str
+) -> List[str]:
+    intro_text = (intro_text or "")[:2600]
+    if llm_client and llm_client.enabled and intro_text.strip():
+        prompt_lang = "中文" if language == "zh" else "English"
+        system = "You extract concise paper keywords. Return strict JSON only."
+        user = (
+            f"语言: {prompt_lang}\n"
+            "从引言抽取3-8个关键词，输出JSON字段 keywords: string[]。\n"
+            f"题目: {title}\n引言:\n{intro_text}\n"
+        )
+        resp = llm_client.complete_json(system, user)
+        if isinstance(resp, dict) and isinstance(resp.get("keywords"), list):
+            kws = [str(x).strip() for x in resp.get("keywords", []) if str(x).strip()]
+            if kws:
+                return kws[:8]
+    return extract_keywords_rule(intro_text, language, top_n=6)
 
 
 def is_noise_sentence(text: str) -> bool:
@@ -817,24 +901,82 @@ def detect_section_pages(page_texts: List[str]) -> Dict[str, set]:
     return pages
 
 
-def scoped_spans_for_topic(
-    spans: List[SentenceSpan], page_texts: List[str], topic: str
-) -> List[SentenceSpan]:
-    section_pages = detect_section_pages(page_texts)
-    # Fixed mapping per user requirement:
-    # task -> INTRODUCTION (fallback ABSTRACT)
-    # method -> MATERIALS AND METHODS / METHODS
-    # contrib -> INTRODUCTION (fallback RESULTS)
-    # limits -> CONCLUSION AND FUTURE WORK / LIMITATIONS / DISCUSSION
+def topic_section_priority(topic: str) -> List[str]:
+    # Fixed mapping per user requirement.
     if topic == "task":
-        priority = ["intro"]
-    elif topic == "method":
-        priority = ["method", "intro"]
-    elif topic == "contrib":
-        priority = ["intro", "results"]
-    else:
-        priority = ["conclusion", "limitations", "discussion", "results"]
+        return ["intro"]
+    if topic == "method":
+        return ["method", "intro"]
+    if topic == "contrib":
+        return ["intro", "results"]
+    return ["conclusion", "limitations", "discussion", "results"]
 
+
+def extract_section_sentence_spans(page_texts: List[str]) -> Dict[str, List[SentenceSpan]]:
+    """
+    Parse section blocks by heading boundaries and collect sentence spans per section.
+    This avoids mixing Abstract and Introduction on the same page.
+    """
+    section_map: Dict[str, List[SentenceSpan]] = {
+        "abstract": [],
+        "intro": [],
+        "method": [],
+        "results": [],
+        "discussion": [],
+        "conclusion": [],
+        "limitations": [],
+    }
+    patterns = SECTION_PATTERNS
+    current_section: Optional[str] = None
+
+    for page_i, text in enumerate(page_texts, start=1):
+        for raw in text.splitlines():
+            line = re.sub(r"\s+", " ", raw).strip()
+            if not line:
+                continue
+            low = line.lower()
+            if len(low) > 140:
+                is_heading = False
+            else:
+                is_heading = bool(re.match(r"^(\d+(\.\d+)*|[ivx]+\.?)\s+", low)) or len(low.split()) <= 10
+
+            matched_key = None
+            if is_heading:
+                for key, pats in patterns.items():
+                    if any(re.search(p, low) for p in pats):
+                        matched_key = key
+                        break
+            if matched_key:
+                current_section = matched_key
+                continue
+
+            if not current_section:
+                continue
+            for s in split_sentences(line):
+                if is_noise_sentence(s):
+                    continue
+                section_map[current_section].append(SentenceSpan(text=s, page=page_i))
+    return section_map
+
+
+def scoped_spans_for_topic(
+    spans: List[SentenceSpan],
+    page_texts: List[str],
+    topic: str,
+    section_sentence_map: Optional[Dict[str, List[SentenceSpan]]] = None,
+) -> List[SentenceSpan]:
+    priority = topic_section_priority(topic)
+
+    # 1) Prefer heading-bounded section spans (paragraph-level).
+    if section_sentence_map:
+        selected_spans: List[SentenceSpan] = []
+        for sec in priority:
+            selected_spans.extend(section_sentence_map.get(sec, []))
+        if selected_spans:
+            return selected_spans
+
+    # 2) Fallback to page-level section detection.
+    section_pages = detect_section_pages(page_texts)
     selected_pages = set()
     for sec in priority:
         selected_pages.update(section_pages.get(sec, set()))
@@ -867,10 +1009,11 @@ def section_context_for_topic(
     page_texts: List[str],
     topic: str,
     keywords: List[str],
+    section_sentence_map: Optional[Dict[str, List[SentenceSpan]]] = None,
     max_lines: int = 34,
     max_chars: int = 3200,
 ) -> str:
-    scoped = scoped_spans_for_topic(spans, page_texts, topic)
+    scoped = scoped_spans_for_topic(spans, page_texts, topic, section_sentence_map=section_sentence_map)
     sec_spans = scoped if scoped else []
 
     picked = pick_sentences(sec_spans, keywords, max_lines) if sec_spans else []
@@ -911,16 +1054,17 @@ def analyze_paper(
             raise RuntimeError("PyMuPDF is not installed")
         doc = fitz.open(pdf_path)
         page_texts, spans = extract_text_and_sentences(doc)
+        section_sentence_map = extract_section_sentence_spans(page_texts)
         full_text = "\n".join(page_texts)
         abstract = extract_abstract(full_text)
         intro = " ".join(page_texts[:2]).strip()
         sections = extract_sections(page_texts)
         captions = extract_captions(page_texts)
 
-        task_scope = scoped_spans_for_topic(spans, page_texts, "task")
-        method_scope = scoped_spans_for_topic(spans, page_texts, "method")
-        contrib_scope = scoped_spans_for_topic(spans, page_texts, "contrib")
-        limits_scope = scoped_spans_for_topic(spans, page_texts, "limits")
+        task_scope = scoped_spans_for_topic(spans, page_texts, "task", section_sentence_map=section_sentence_map)
+        method_scope = scoped_spans_for_topic(spans, page_texts, "method", section_sentence_map=section_sentence_map)
+        contrib_scope = scoped_spans_for_topic(spans, page_texts, "contrib", section_sentence_map=section_sentence_map)
+        limits_scope = scoped_spans_for_topic(spans, page_texts, "limits", section_sentence_map=section_sentence_map)
 
         task_spans = pick_sentences(task_scope, ["problem", "task", "we address", "we study", "aim", "this paper", "we propose"], 1)
         if not task_spans:
@@ -952,6 +1096,7 @@ def analyze_paper(
             limit_spans = fallback_sentences(scoped_tail or (spans[-12:] if len(spans) > 12 else spans), 2)
 
         open_source_status, open_source_page = detect_open_source(full_text)
+        keywords = extract_keywords_from_intro(intro, language, llm_client, result["title"])
 
         llm_method = []
         llm_contrib = []
@@ -978,6 +1123,7 @@ def analyze_paper(
                 page_texts,
                 topic="task",
                 keywords=["problem", "task", "we address", "we study", "aim", "this paper", "we propose"],
+                section_sentence_map=section_sentence_map,
                 max_lines=14,
                 max_chars=min(llm_client.max_input_chars, 1200),
             )
@@ -1022,6 +1168,7 @@ def analyze_paper(
                 page_texts,
                 topic="method",
                 keywords=["we propose", "framework", "method", "pipeline", "approach", "architecture"],
+                section_sentence_map=section_sentence_map,
                 max_lines=22,
                 max_chars=min(llm_client.max_input_chars, 1800),
             )
@@ -1059,6 +1206,7 @@ def analyze_paper(
                 page_texts,
                 topic="contrib",
                 keywords=["contribution", "results", "outperform", "we show", "we demonstrate", "experiment"],
+                section_sentence_map=section_sentence_map,
                 max_lines=26,
                 max_chars=min(llm_client.max_input_chars, 2200),
             )
@@ -1109,6 +1257,7 @@ def analyze_paper(
                 page_texts,
                 topic="limits",
                 keywords=["limitation", "future work", "challenge", "bottleneck", "fails"],
+                section_sentence_map=section_sentence_map,
                 max_lines=20,
                 max_chars=min(llm_client.max_input_chars, 1600),
             )
@@ -1177,6 +1326,7 @@ def analyze_paper(
                 "intro": intro,
                 "sections": sections,
                 "figure_captions": captions,
+                "keywords": keywords,
                 "task_definition": llm_task or make_items(task_spans, language, 1),
                 "core_method": llm_method or make_items(method_spans, language, 3),
                 "main_contributions": llm_contrib or make_items(contrib_spans, language, 4),
@@ -1207,6 +1357,7 @@ def analyze_paper(
                 "intro": "",
                 "sections": [],
                 "figure_captions": [],
+                "keywords": [],
                 "task_definition": [],
                 "core_method": [],
                 "main_contributions": [],
@@ -1265,7 +1416,7 @@ def as_doc_text(p: Dict) -> str:
     return " ".join(bits).strip()
 
 
-def cluster_papers(papers: List[Dict]) -> Dict[int, List[int]]:
+def cluster_papers(papers: List[Dict], forced_k: int = 0) -> Dict[int, List[int]]:
     n = len(papers)
     if n == 0:
         return {}
@@ -1277,6 +1428,14 @@ def cluster_papers(papers: List[Dict]) -> Dict[int, List[int]]:
     X = vectorizer.fit_transform(docs)
 
     max_k = min(5, n)
+    if forced_k > 0:
+        k = max(1, min(forced_k, n))
+        model = KMeans(n_clusters=k, n_init=10, random_state=SEED)
+        labels = model.fit_predict(X)
+        clusters: Dict[int, List[int]] = defaultdict(list)
+        for i, label in enumerate(labels):
+            clusters[int(label)].append(i)
+        return dict(sorted(clusters.items(), key=lambda kv: kv[0]))
     best_k = 2 if n >= 2 else 1
     best_score = -1.0
 
@@ -1688,9 +1847,26 @@ def render_ppt(output: Path, overview: List[Dict], papers: List[Dict], final_syn
     return None
 
 
+def get_stage_paths(args: argparse.Namespace, output_dir: Path) -> Dict[str, Path]:
+    analyze_json = Path(args.analyze_json) if args.analyze_json else output_dir / f"review_{args.collection}.analyze.json"
+    global_json = Path(args.global_json) if args.global_json else output_dir / f"review_{args.collection}.global.json"
+    report_json = output_dir / f"review_{args.collection}.json"
+    out_md = output_dir / f"review_{args.collection}.md"
+    out_pptx = output_dir / f"review_{args.collection}.pptx"
+    return {
+        "analyze_json": analyze_json,
+        "global_json": global_json,
+        "report_json": report_json,
+        "out_md": out_md,
+        "out_pptx": out_pptx,
+    }
+
+
 def main() -> int:
     try:
         args = parse_args()
+        cfg = load_config_json(Path(args.config_json) if args.config_json else None)
+        apply_config_defaults(args, cfg)
         validate_args(args)
     except Exception as e:
         print(f"[error] {e}", file=sys.stderr)
@@ -1715,12 +1891,13 @@ def main() -> int:
         if args.paper_status_file
         else output_dir / f"review_{args.collection}.paper_status.jsonl"
     )
+    paths = get_stage_paths(args, output_dir)
     try:
         paper_status_file.unlink(missing_ok=True)
     except Exception:
         pass
-    append_log(log_file, f"start collection={args.collection} llm_mode={args.llm_mode}")
-    vprint(f"[start] collection={args.collection} llm_mode={args.llm_mode}")
+    append_log(log_file, f"start collection={args.collection} mode={args.mode} llm_mode={args.llm_mode}")
+    vprint(f"[start] collection={args.collection} mode={args.mode} llm_mode={args.llm_mode}")
     write_status(
         status_file,
         stage="init",
@@ -1755,82 +1932,56 @@ def main() -> int:
         message="读取collection并构建文献清单",
     )
 
-    manifest_source = "input_manifest"
-    if args.manifest:
-        try:
-            manifest = read_manifest(Path(args.manifest))
-        except Exception as e:
-            print(f"[error] invalid manifest: {e}", file=sys.stderr)
-            return 2
-    else:
-        try:
-            manifest = build_manifest_from_zotero_collection(
-                collection=args.collection,
-                zotero_db=Path(args.zotero_db),
-                zotero_storage_dir=Path(args.zotero_storage_dir),
-            )
-            manifest_source = "zotero_db"
-            manifest_out = output_dir / f"review_{args.collection}.manifest.json"
-            manifest_out.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f"[ok] wrote {manifest_out}")
-            append_log(log_file, f"manifest generated: {manifest_out}")
-            vprint(f"[manifest] generated: {manifest_out}")
-        except Exception as e:
-            print(f"[error] failed to build manifest from zotero collection: {e}", file=sys.stderr)
-            append_log(log_file, f"manifest failed: {e}")
-            write_status(
-                status_file,
-                stage="manifest",
-                status="failed",
-                progress_current=5,
-                progress_total=100,
-                message=f"manifest失败: {e}",
-            )
-            return 2
+    analyze_payload: Optional[Dict[str, Any]] = None
+    global_payload: Optional[Dict[str, Any]] = None
 
-    if manifest.get("collection") != args.collection:
-        print(
-            f"[warn] manifest collection '{manifest.get('collection')}' != --collection '{args.collection}', continue with --collection name",
-            file=sys.stderr,
+    if args.mode in {"analyze", "all"}:
+        manifest_source = "input_manifest"
+        if args.manifest:
+            try:
+                manifest = read_manifest(Path(args.manifest))
+            except Exception as e:
+                print(f"[error] invalid manifest: {e}", file=sys.stderr)
+                return 2
+        else:
+            try:
+                manifest = build_manifest_from_zotero_collection(
+                    collection=args.collection,
+                    zotero_db=Path(args.zotero_db),
+                    zotero_storage_dir=Path(args.zotero_storage_dir),
+                )
+                manifest_source = "zotero_db"
+                manifest_out = output_dir / f"review_{args.collection}.manifest.json"
+                manifest_out.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+                print(f"[ok] wrote {manifest_out}")
+                append_log(log_file, f"manifest generated: {manifest_out}")
+                vprint(f"[manifest] generated: {manifest_out}")
+            except Exception as e:
+                print(f"[error] failed to build manifest from zotero collection: {e}", file=sys.stderr)
+                return 2
+
+        items = [x for x in manifest.get("items", []) if isinstance(x, dict) and x.get("pdf_path")]
+        if not items:
+            print("[error] no items with pdf_path found", file=sys.stderr)
+            return 1
+
+        items = dedup_items(items)[: args.max_papers]
+        append_log(log_file, f"papers selected: {len(items)}")
+        vprint(f"[papers] selected={len(items)}")
+        write_status(
+            status_file,
+            stage="paper_analysis",
+            status="running",
+            progress_current=10,
+            progress_total=100,
+            message=f"开始逐篇解析，共{len(items)}篇",
+            extra={"paper_total": len(items)},
         )
 
-    items = [x for x in manifest.get("items", []) if isinstance(x, dict) and x.get("pdf_path")]
-    if not items:
-        print("[error] no items with pdf_path found", file=sys.stderr)
-        return 1
-
-    items = dedup_items(items)[: args.max_papers]
-    append_log(log_file, f"papers selected: {len(items)}")
-    vprint(f"[papers] selected={len(items)}")
-    write_status(
-        status_file,
-        stage="paper_analysis",
-        status="running",
-        progress_current=10,
-        progress_total=100,
-        message=f"开始逐篇解析，共{len(items)}篇",
-        extra={"paper_total": len(items)},
-    )
-
-    papers = []
-    failures = []
-    for idx, it in enumerate(items, start=1):
-        vprint(f"[paper {idx}/{len(items)}] start: {it.get('title','unknown')[:90]}")
-        append_jsonl(
-            paper_status_file,
-            {
-                "timestamp": ts_now(),
-                "index": idx,
-                "total": len(items),
-                "title": it.get("title", "unknown"),
-                "status": "started",
-                "pdf_path": it.get("pdf_path", ""),
-            },
-        )
-        if not Path(it.get("pdf_path", "")).exists():
-            failures.append({"title": it.get("title", "unknown"), "reason": "pdf_not_found", "pdf_path": it.get("pdf_path", "")})
-            append_log(log_file, f"[{idx}/{len(items)}] missing pdf: {it.get('pdf_path','')}")
-            vprint(f"[paper {idx}/{len(items)}] missing pdf")
+        papers = []
+        failures = []
+        for idx, it in enumerate(items, start=1):
+            vprint(f"[paper {idx}/{len(items)}] start: {it.get('title','unknown')[:90]}")
             append_jsonl(
                 paper_status_file,
                 {
@@ -1838,40 +1989,44 @@ def main() -> int:
                     "index": idx,
                     "total": len(items),
                     "title": it.get("title", "unknown"),
-                    "status": "failed",
-                    "reason": "pdf_not_found",
+                    "status": "started",
+                    "pdf_path": it.get("pdf_path", ""),
                 },
             )
-            continue
-        p = analyze_paper(
-            it,
-            output_dir,
-            include_images,
-            args.language,
-            llm_client=llm_client,
-            progress_cb=(lambda m, idx=idx, n=len(items): vprint(f"[paper {idx}/{n}] {m}")),
-        )
-        papers.append(p)
-        write_status(
-            status_file,
-            stage="paper_analysis",
-            status="running",
-            progress_current=10 + int(65 * idx / max(1, len(items))),
-            progress_total=100,
-            message=f"解析中 {idx}/{len(items)}: {p.get('title','unknown')[:60]}",
-            extra={"paper_current": idx, "paper_total": len(items)},
-        )
-        append_log(log_file, f"[{idx}/{len(items)}] parsed: {p.get('title','unknown')}")
-        vprint(
-            f"[paper {idx}/{len(items)}] parsed "
-            f"(llm_task={bool(p.get('llm_task_used'))}, "
-            f"llm_method={bool(p.get('llm_method_used'))}, "
-            f"llm_contrib={bool(p.get('llm_contrib_used'))}, "
-            f"llm_limits={bool(p.get('llm_limits_used'))})"
-        )
-        if p.get("parse_failed"):
-            failures.append({"title": p.get("title", "unknown"), "reason": p.get("failure_reason", "parse_failed")})
-            vprint(f"[paper {idx}/{len(items)}] failed: {p.get('failure_reason','parse_failed')}")
+            if not Path(it.get("pdf_path", "")).exists():
+                failures.append({"title": it.get("title", "unknown"), "reason": "pdf_not_found", "pdf_path": it.get("pdf_path", "")})
+                append_jsonl(
+                    paper_status_file,
+                    {
+                        "timestamp": ts_now(),
+                        "index": idx,
+                        "total": len(items),
+                        "title": it.get("title", "unknown"),
+                        "status": "failed",
+                        "reason": "pdf_not_found",
+                    },
+                )
+                continue
+            p = analyze_paper(
+                it,
+                output_dir,
+                include_images,
+                args.language,
+                llm_client=llm_client,
+                progress_cb=(lambda m, idx=idx, n=len(items): vprint(f"[paper {idx}/{n}] {m}")),
+            )
+            papers.append(p)
+            write_status(
+                status_file,
+                stage="paper_analysis",
+                status="running",
+                progress_current=10 + int(65 * idx / max(1, len(items))),
+                progress_total=100,
+                message=f"解析中 {idx}/{len(items)}: {p.get('title','unknown')[:60]}",
+                extra={"paper_current": idx, "paper_total": len(items)},
+            )
+            if p.get("parse_failed"):
+                failures.append({"title": p.get("title", "unknown"), "reason": p.get("failure_reason", "parse_failed")})
             append_jsonl(
                 paper_status_file,
                 {
@@ -1879,19 +2034,7 @@ def main() -> int:
                     "index": idx,
                     "total": len(items),
                     "title": p.get("title", "unknown"),
-                    "status": "failed",
-                    "reason": p.get("failure_reason", "parse_failed"),
-                },
-            )
-        else:
-            append_jsonl(
-                paper_status_file,
-                {
-                    "timestamp": ts_now(),
-                    "index": idx,
-                    "total": len(items),
-                    "title": p.get("title", "unknown"),
-                    "status": "parsed",
+                    "status": "failed" if p.get("parse_failed") else "parsed",
                     "venue": p.get("venue", "unknown"),
                     "year": p.get("year", "unknown"),
                     "authors_n": len(p.get("authors", [])),
@@ -1903,100 +2046,135 @@ def main() -> int:
                     "llm_error": p.get("llm_error", ""),
                     "llm_error_debug": p.get("llm_error_debug", ""),
                     "llm_raw_preview": p.get("llm_raw_preview", ""),
+                    "keywords": p.get("keywords", []),
                     "task_definition": [x.get("text", "") for x in p.get("task_definition", [])[:1]],
                     "core_method": [x.get("text", "") for x in p.get("core_method", [])[:3]],
                     "main_contributions": [x.get("text", "") for x in p.get("main_contributions", [])[:4]],
                     "limitations": [x.get("text", "") for x in p.get("limitations", [])[:3]],
                 },
             )
-
-    processable = [p for p in papers if not p.get("parse_failed")]
-    if not processable:
-        report = {
+        analyze_payload = {
             "run_config": vars(args),
             "collection_info": {"collection": args.collection, "manifest_source": manifest_source},
             "paper_count_total": len(items),
-            "paper_count_processed": 0,
-            "clusters": [],
+            "paper_count_processed": len([p for p in papers if not p.get("parse_failed")]),
             "papers": papers,
-            "deck_outline": {},
-            "quality_gate_results": {},
             "failures": failures,
         }
-        out_json = output_dir / f"review_{args.collection}.json"
-        out_md = output_dir / f"review_{args.collection}.md"
-        out_json.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        out_md.write_text("# Empty Report\n\nNo processable PDFs found.\n", encoding="utf-8")
-        print(f"[ok] wrote {out_json}")
-        print(f"[ok] wrote {out_md}")
-        append_log(log_file, "no processable papers")
+        paths["analyze_json"].write_text(json.dumps(analyze_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[ok] wrote {paths['analyze_json']}")
+        append_log(log_file, f"analyze written: {paths['analyze_json']}")
+        if args.mode == "analyze":
+            write_status(
+                status_file,
+                stage="done",
+                status="completed",
+                progress_current=100,
+                progress_total=100,
+                message="analyze完成",
+                extra={"analyze_json": str(paths["analyze_json"])},
+            )
+            return 0
+
+    if args.mode in {"global", "all"}:
+        if analyze_payload is None:
+            if not paths["analyze_json"].exists():
+                print(f"[error] analyze json not found: {paths['analyze_json']}", file=sys.stderr)
+                return 2
+            analyze_payload = json.loads(paths["analyze_json"].read_text(encoding="utf-8"))
+        processable = [p for p in analyze_payload.get("papers", []) if not p.get("parse_failed")]
+        if not processable:
+            print("[error] no processable papers in analyze json", file=sys.stderr)
+            return 1
         write_status(
             status_file,
-            stage="done",
-            status="completed",
-            progress_current=100,
+            stage="synthesis",
+            status="running",
+            progress_current=82,
             progress_total=100,
-            message="无可处理PDF，已输出空报告",
+            message="聚类与跨论文总结",
         )
-        return 0
+        clusters = cluster_papers(processable, forced_k=args.cluster_k)
+        overview = make_overview(clusters, processable, args.language, llm_client=llm_client)
+        final_syn = make_final_synthesis(overview, args.language, llm_client=llm_client)
+        quality = run_quality_gates(processable, overview, final_syn)
+        global_payload = {
+            "run_config": vars(args),
+            "collection_info": analyze_payload.get("collection_info", {"collection": args.collection}),
+            "paper_count_processed": len(processable),
+            "cluster_k_requested": args.cluster_k,
+            "cluster_k_actual": len(overview),
+            "clusters": overview,
+            "final_synthesis": final_syn,
+            "quality_gate_results": quality,
+        }
+        paths["global_json"].write_text(json.dumps(global_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[ok] wrote {paths['global_json']}")
+        append_log(log_file, f"global written: {paths['global_json']}")
+        if args.mode == "global":
+            write_status(
+                status_file,
+                stage="done",
+                status="completed",
+                progress_current=100,
+                progress_total=100,
+                message="global完成",
+                extra={"global_json": str(paths["global_json"])},
+            )
+            return 0
 
-    write_status(
-        status_file,
-        stage="synthesis",
-        status="running",
-        progress_current=78,
-        progress_total=100,
-        message="聚类与跨论文总结",
-    )
-    clusters = cluster_papers(processable)
-    vprint(f"[synthesis] clustering complete; processable={len(processable)}")
-    overview = make_overview(clusters, processable, args.language, llm_client=llm_client)
-    final_syn = make_final_synthesis(overview, args.language, llm_client=llm_client)
-    quality = run_quality_gates(processable, overview, final_syn)
+    if args.mode in {"render", "all"}:
+        if analyze_payload is None:
+            if not paths["analyze_json"].exists():
+                print(f"[error] analyze json not found: {paths['analyze_json']}", file=sys.stderr)
+                return 2
+            analyze_payload = json.loads(paths["analyze_json"].read_text(encoding="utf-8"))
+        if global_payload is None:
+            if not paths["global_json"].exists():
+                print(f"[error] global json not found: {paths['global_json']}", file=sys.stderr)
+                return 2
+            global_payload = json.loads(paths["global_json"].read_text(encoding="utf-8"))
+        processable = [p for p in analyze_payload.get("papers", []) if not p.get("parse_failed")]
+        overview = global_payload.get("clusters", [])
+        final_syn = global_payload.get("final_synthesis", {})
 
-    deck_outline = {
-        "part1_overview_title": "文献整体结构梳理" if args.language == "zh" else "Literature Structure Overview",
-        "part2_per_paper_count": len(processable),
-        "part3_title": "结构归纳与研究机会" if args.language == "zh" else "Synthesis and Research Opportunities",
-    }
+        write_status(
+            status_file,
+            stage="render",
+            status="running",
+            progress_current=92,
+            progress_total=100,
+            message="渲染 Markdown / PPTX",
+        )
+        render_markdown(paths["out_md"], args.collection, overview, processable, final_syn)
+        ppt_warn = render_ppt(paths["out_pptx"], overview, processable, final_syn, args.language)
 
-    report = {
-        "run_config": vars(args),
-        "collection_info": {"collection": args.collection, "manifest_source": manifest_source},
-        "paper_count_total": len(items),
-        "paper_count_processed": len(processable),
-        "clusters": overview,
-        "papers": processable,
-        "deck_outline": deck_outline,
-        "quality_gate_results": quality,
-        "failures": failures,
-    }
+        deck_outline = {
+            "part1_overview_title": "文献整体结构梳理" if args.language == "zh" else "Literature Structure Overview",
+            "part2_per_paper_count": len(processable),
+            "part3_title": "结构归纳与研究机会" if args.language == "zh" else "Synthesis and Research Opportunities",
+        }
+        report = {
+            "run_config": vars(args),
+            "collection_info": analyze_payload.get("collection_info", {"collection": args.collection}),
+            "paper_count_total": analyze_payload.get("paper_count_total", len(processable)),
+            "paper_count_processed": len(processable),
+            "clusters": overview,
+            "papers": processable,
+            "deck_outline": deck_outline,
+            "quality_gate_results": global_payload.get("quality_gate_results", {}),
+            "failures": analyze_payload.get("failures", []),
+            "analyze_json": str(paths["analyze_json"]),
+            "global_json": str(paths["global_json"]),
+        }
+        paths["report_json"].write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[ok] wrote {paths['report_json']}")
+        print(f"[ok] wrote {paths['out_md']}")
+        if ppt_warn:
+            print(f"[warn] {ppt_warn}")
+        else:
+            print(f"[ok] wrote {paths['out_pptx']}")
 
-    out_json = output_dir / f"review_{args.collection}.json"
-    out_md = output_dir / f"review_{args.collection}.md"
-    out_pptx = output_dir / f"review_{args.collection}.pptx"
-
-    out_json.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    write_status(
-        status_file,
-        stage="render",
-        status="running",
-        progress_current=92,
-        progress_total=100,
-        message="渲染 Markdown / PPTX",
-    )
-    render_markdown(out_md, args.collection, overview, processable, final_syn)
-    ppt_warn = render_ppt(out_pptx, overview, processable, final_syn, args.language)
-    vprint("[render] markdown/ppt done")
-
-    print(f"[ok] wrote {out_json}")
-    print(f"[ok] wrote {out_md}")
-    if ppt_warn:
-        print(f"[warn] {ppt_warn}")
-        append_log(log_file, f"ppt warn: {ppt_warn}")
-    else:
-        print(f"[ok] wrote {out_pptx}")
-    vprint("[done] completed")
     append_log(log_file, "completed")
     write_status(
         status_file,
@@ -2005,7 +2183,13 @@ def main() -> int:
         progress_current=100,
         progress_total=100,
         message="任务完成",
-        extra={"output_json": str(out_json), "output_md": str(out_md), "output_pptx": str(out_pptx)},
+        extra={
+            "analyze_json": str(paths["analyze_json"]),
+            "global_json": str(paths["global_json"]),
+            "output_json": str(paths["report_json"]),
+            "output_md": str(paths["out_md"]),
+            "output_pptx": str(paths["out_pptx"]),
+        },
     )
     return 0
 
