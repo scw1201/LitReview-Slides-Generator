@@ -1706,6 +1706,7 @@ def make_final_synthesis(
         directions.append(
             {
                 "cluster_id": c["cluster_id"],
+                "topic": c["core_problem"],
                 "advantages": c["main_tech_path"],
                 "limitations": c["typical_limits"],
                 "potential_gap": c["typical_limits"],
@@ -1781,6 +1782,31 @@ def run_quality_gates(papers: List[Dict], overview: List[Dict], final_syn: Dict)
     return res
 
 
+def zh_num_label(i: int) -> str:
+    m = {
+        1: "一",
+        2: "二",
+        3: "三",
+        4: "四",
+        5: "五",
+        6: "六",
+        7: "七",
+        8: "八",
+        9: "九",
+        10: "十",
+    }
+    return m.get(i, str(i))
+
+
+def direction_title(i: int, topic: str, language: str) -> str:
+    t = (topic or "").strip()
+    if language == "zh":
+        prefix = f"方向{zh_num_label(i)}"
+        return f"{prefix}：{t}" if t else prefix
+    prefix = f"Direction {i}"
+    return f"{prefix}: {t}" if t else prefix
+
+
 def render_markdown(output: Path, collection: str, overview: List[Dict], papers: List[Dict], final_syn: Dict) -> None:
     lines = []
     lines.append(f"# review_{collection}")
@@ -1788,7 +1814,7 @@ def render_markdown(output: Path, collection: str, overview: List[Dict], papers:
     lines.append("## 文献整体结构梳理")
     lines.append("")
     for i, c in enumerate(overview, start=1):
-        lines.append(f"### 方向{i}")
+        lines.append(f"### {direction_title(i, c.get('core_problem', ''), 'zh')}")
         lines.append(f"- 核心问题: {c['core_problem']}")
         lines.append(f"- 主流技术路径: {c['main_tech_path']}")
         lines.append(f"- 典型局限: {c['typical_limits']}")
@@ -1833,6 +1859,14 @@ def render_markdown(output: Path, collection: str, overview: List[Dict], papers:
     lines.append("")
     lines.append(final_syn.get("core_problem_summary", ""))
     lines.append("")
+    dirs = final_syn.get("directions", [])
+    if isinstance(dirs, list) and dirs:
+        lines.append("### 主要技术方向")
+        for d in dirs[:5]:
+            cid = int(d.get("cluster_id", 0)) + 1
+            topic = str(d.get("topic", "")).strip()
+            lines.append(f"- {direction_title(cid, topic, 'zh')}")
+        lines.append("")
     lines.append("### Possible Research Gaps")
     for g in final_syn.get("possible_research_gaps", []):
         lines.append(f"- {g}")
@@ -1908,7 +1942,7 @@ def render_ppt(output: Path, overview: List[Dict], papers: List[Dict], final_syn
     add_textbox(slide, 0.5, 0.2, 12.5, 0.8, "文献整体结构梳理" if language == "zh" else "Literature Structure Overview", 30, True, black)
     y = 1.0
     for i, c in enumerate(overview, start=1):
-        add_textbox(slide, 0.6, y, 12.0, 0.5, f"{i}. 方向{ i }" if language == "zh" else f"{i}. Direction {i}", 20, True, blue)
+        add_textbox(slide, 0.6, y, 12.0, 0.5, direction_title(i, c.get("core_problem", ""), language), 20, True, blue)
         y += 0.45
         add_textbox(slide, 0.9, y, 11.8, 0.45, f"核心问题: {c['core_problem']}" if language == "zh" else f"Core Problem: {c['core_problem']}", 14, False, black)
         y += 0.4
@@ -1973,7 +2007,18 @@ def render_ppt(output: Path, overview: List[Dict], papers: List[Dict], final_syn
 
     y = 2.1
     for d in final_syn.get("directions", [])[:5]:
-        add_textbox(slide, 0.7, y, 12.0, 0.35, f"方向{d['cluster_id'] + 1}" if language == "zh" else f"Direction {d['cluster_id'] + 1}", 15, True, blue)
+        topic = str(d.get("topic", "")).strip()
+        add_textbox(
+            slide,
+            0.7,
+            y,
+            12.0,
+            0.35,
+            direction_title(int(d["cluster_id"]) + 1, topic, language),
+            15,
+            True,
+            blue,
+        )
         y += 0.3
         add_textbox(slide, 1.0, y, 11.7, 0.3, ("优势: " if language == "zh" else "Advantage: ") + d["advantages"], 12, False, black)
         y += 0.25
