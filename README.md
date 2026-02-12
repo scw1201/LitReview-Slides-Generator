@@ -1,50 +1,49 @@
 # LitReview Slides Generator
 
-Generate structured literature-review slides (`.pptx`) and companion reports (`.md`, `.json`) from a **local Zotero collection**.
+一个从 **Zotero 本地文献库** 自动生成文献综述材料的工具：
+- 输出 `PPT`（组会风格）
+- 输出 `Markdown`（便于手改）
+- 输出结构化 `JSON`（便于复用和二次开发）
 
-This project is built for research-group style reporting:
-- Stage 1: per-paper analysis
-- Stage 2: cross-paper clustering + synthesis (optional RAG)
-- Stage 3: final rendering to markdown and PowerPoint
+主打三件事：**可控流程、可追踪状态、可编辑结果** ✨
 
-## Highlights
+## 功能全览 🚀
 
-- Local-first pipeline (reads Zotero local DB + local PDF attachments)
-- 3-stage workflow: `analyze` / `global` / `render`
-- Chinese or English output (`--language zh|en`)
-- Optional figure extraction (Fig.1-first strategy)
-- Optional RAG-enhanced global synthesis via `zotero-mcp`
-- Streamlit GUI for config/run/inspection/editing
+- 本地优先：只读本地 Zotero DB + 本地 PDF 附件
+- 三阶段流水线：`analyze` → `global` → `render`
+- 支持中文/英文输出：`--language zh|en`
+- 单篇分析字段：任务定义、核心方法、主要贡献、局限、关键词
+- 全局分析字段：研究方向聚类、跨论文归纳、研究空缺
+- PPT 自动排版（16:9），支持插图（Fig.1 优先）
+- GUI 支持：配置、分步运行、进度监控、单篇分析编辑
+- 可选 RAG（基于 `zotero-mcp`）增强第二阶段总结
 
-## Repository Layout
+## 项目结构 📁
 
-- `scripts/build_litreview.py`: main CLI pipeline
-- `scripts/gui.py`: Streamlit GUI
-- `scripts/requirements.txt`: Python dependencies
-- `config/pipeline.json`: default runtime config
-- `config/section_map.default.json`: section heading mapping rules
-- `references/input_manifest_schema.md`: manifest reference
-- `agents/openai.yaml`: skill packaging metadata
-- `SKILL.md`: Codex skill entry
+- `scripts/build_litreview.py`：主 CLI 管线
+- `scripts/gui.py`：Streamlit GUI
+- `scripts/requirements.txt`：依赖
+- `config/pipeline.json`：默认配置
+- `config/section_map.default.json`：章节匹配规则
+- `references/input_manifest_schema.md`：输入结构参考
+- `SKILL.md`、`agents/openai.yaml`：Codex skill 打包相关
 
-## Requirements
+## 环境要求 🧩
 
 - Python 3.10+
-- Local Zotero desktop library
-- Optional:
-  - Codex CLI (`--llm_mode codex_cli`)
-  - OpenAI-compatible endpoint (e.g., Ollama)
-  - `zotero-mcp` for RAG in Stage 2
+- 本地安装并可访问的 Zotero
+- 可选：
+  - Codex CLI（推荐，`--llm_mode codex_cli`）
+  - OpenAI-compatible 接口（如 Ollama）
+  - `zotero-mcp`（用于 RAG）
 
-## Install
+## 安装 🔧
 
 ```bash
 python3 -m pip install -r scripts/requirements.txt
 ```
 
-## Quick Start (CLI)
-
-Run all 3 stages in one command:
+## 一条命令全流程（CLI）⚡
 
 ```bash
 python3 scripts/build_litreview.py \
@@ -58,40 +57,59 @@ python3 scripts/build_litreview.py \
   --verbose
 ```
 
-## Stage-by-Stage Usage
+## 分阶段运行（推荐）🪜
 
-### Stage 1: Analyze (per paper)
+### Step 1: 单篇分析（analyze）
 
 ```bash
 python3 scripts/build_litreview.py \
   --collection "museum-digital-human" \
   --mode analyze \
   --llm_mode codex_cli \
+  --llm_model gpt-5-mini \
   --output_dir outputs
 ```
 
-### Stage 2: Global (clustering + synthesis)
+### Step 2: 全局聚类与总结（global）
 
 ```bash
 python3 scripts/build_litreview.py \
   --collection "museum-digital-human" \
   --mode global \
+  --cluster_k 3 \
   --llm_mode codex_cli \
+  --llm_model gpt-5-mini \
   --output_dir outputs
 ```
 
-### Stage 3: Render (ppt/md/json)
+### Step 3: 生成 Markdown/PPT（render）
 
 ```bash
 python3 scripts/build_litreview.py \
   --collection "museum-digital-human" \
   --mode render \
+  --language zh \
+  --include_images true \
   --output_dir outputs
 ```
 
-## Output Structure
+## GUI 使用 🖥️
 
-Default (`--session_layout folder`):
+启动：
+
+```bash
+streamlit run scripts/gui.py
+```
+
+你可以在 GUI 里：
+- 在 `Pipeline` 页按步骤点击运行 Step1/Step2/Step3
+- 在 `Config` 页统一维护参数（不需要手改 JSON）
+- 在 `Edit Analysis` 页预览/编辑单篇分析并保存
+- 查看当前运行状态、日志和每篇处理进度
+
+## 输出目录规则 📦
+
+默认 `--session_layout folder`：
 
 - `outputs/<collection>/review_<collection>.manifest.json`
 - `outputs/<collection>/review_<collection>.analyze.json`
@@ -103,50 +121,38 @@ Default (`--session_layout folder`):
 - `outputs/<collection>/review_<collection>.run.log`
 - `outputs/<collection>/review_<collection>.paper_status.jsonl`
 
-## GUI
+## LLM 模式 🤖
 
-```bash
-streamlit run scripts/gui.py
-```
-
-GUI supports:
-- Stage-triggered execution (Analyze / Global / Render)
-- Config editing (single config source)
-- Current-run status + per-paper progress
-- Per-paper analysis preview/edit + save
-
-## LLM Backends
-
-### `codex_cli` (recommended)
+### 1) Codex CLI（推荐）
 
 ```bash
 --llm_mode codex_cli --llm_model gpt-5-mini
 ```
 
-Optional explicit binary path:
+可选指定可执行文件：
 
 ```bash
 --codex_bin /Applications/Codex.app/Contents/Resources/codex
 ```
 
-### `openai_compatible` (e.g., Ollama)
+### 2) OpenAI-compatible（如 Ollama）
 
 ```bash
 --llm_mode openai_compatible \
 --llm_base_url http://127.0.0.1:11434/v1
 ```
 
-And set API key variable if endpoint requires it:
+如接口要求 API Key：
 
 ```bash
 export OPENAI_API_KEY=your_key
 ```
 
-## Optional RAG (Stage 2 only)
+## 可选 RAG（仅作用于 Step 2）🧠
 
-This project can use `zotero-mcp` semantic retrieval to improve global synthesis quality.
+使用 `zotero-mcp` 的语义检索增强全局方向归纳和 research gap 质量。
 
-Recommended setup (one-time):
+一次性建库（示例）：
 
 ```bash
 zotero-mcp setup --semantic-config-only
@@ -154,37 +160,53 @@ zotero-mcp update-db --fulltext --force-rebuild
 zotero-mcp db-status
 ```
 
-Then enable RAG in config or CLI:
+开启 RAG：
 
 ```bash
 --rag_enabled true \
 --rag_top_k 8
 ```
 
-Useful RAG runtime options:
-- `--rag_home_dir`: writable home/cache directory for semantic DB runtime
-- `--rag_config_path`: custom `zotero-mcp` semantic config
-- `--rag_use_local true`: use local Zotero API mode
-- `--rag_python_bin`: Python interpreter with `zotero_mcp` installed
+常用 RAG 参数：
+- `--rag_home_dir`：语义 DB 运行目录（建议可写目录）
+- `--rag_config_path`：zotero-mcp 配置路径
+- `--rag_use_local true`：本地 Zotero API 模式
+- `--rag_python_bin`：安装了 `zotero_mcp` 的 Python
 
-If RAG retrieval fails, pipeline falls back to non-RAG synthesis and records reason in `global.json.rag.last_error`.
+说明：RAG 失败不会中断流程，会自动回退，并在 `global.json.rag.last_error` 记录原因。
 
-## Open-source Notes
+## 常见问题 ❓
 
-- Generated files, logs, cache, and local runtime data are excluded by `.gitignore`.
-- Avoid absolute local paths in committed configs/docs.
-- Do not commit private Zotero data, PDFs, or API keys.
+### 1) 为什么方向总结像“单篇论文”？
+常见原因：
+- 聚类数过大导致出现 `paper_count=1` 的簇
+- 某些论文 LLM 额度/调用失败，回退到规则提取，语义质量下降
 
-## Development
+建议：
+- 固定 `--cluster_k 3` 或 `4`
+- 额度恢复后重跑 `analyze + global`
 
-Basic syntax check:
+### 2) 处理慢怎么办？
+- 降低 `--max_papers`
+- 降低 `--llm_max_input_chars`
+- 分阶段运行，先 `analyze` 再 `global`
+
+## 开发与贡献 ❤️
+
+语法检查：
 
 ```bash
 python3 -m py_compile scripts/build_litreview.py scripts/gui.py
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
+贡献指南见：`CONTRIBUTING.md`
+
+## 开源注意事项 🔐
+
+- 仓库已忽略输出、日志、缓存、临时文件（见 `.gitignore`）
+- 请勿提交本地 Zotero 数据、PDF、API Key
+- 避免在配置和文档里写死个人绝对路径
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT，见 `LICENSE`。
