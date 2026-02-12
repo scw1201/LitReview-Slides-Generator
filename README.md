@@ -175,21 +175,6 @@ zotero-mcp db-status
 
 说明：RAG 失败不会中断流程，会自动回退，并在 `global.json.rag.last_error` 记录原因。
 
-## 常见问题 ❓
-
-### 1) 为什么方向总结像“单篇论文”？
-常见原因：
-- 聚类数过大导致出现 `paper_count=1` 的簇
-- 某些论文 LLM 额度/调用失败，回退到规则提取，语义质量下降
-
-建议：
-- 固定 `--cluster_k 3` 或 `4`
-- 额度恢复后重跑 `analyze + global`
-
-### 2) 处理慢怎么办？
-- 降低 `--max_papers`
-- 降低 `--llm_max_input_chars`
-- 分阶段运行，先 `analyze` 再 `global`
 
 ## 开发与贡献 ❤️
 
